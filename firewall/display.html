@@ -172,56 +172,70 @@ const el  = document.getElementById('screen');
 const bar = document.getElementById('age');
 let current = null, demoMode = false, demoIndex = 0;
 
-/* ---------------- rendering ---------------- */
+/* ---------------- rendering ----------------
+   Split deliberately: paint*() rebuilds the DOM (and therefore replays the
+   entrance animation), tick() only nudges text and widths. The per-second
+   clock must never call paint*(), or the whole stack re-animates every second.
+   ------------------------------------------------------------------------ */
 function styleFor(type){
   return CATEGORY_STYLES.find(c => c.match.test(type || '')) || CATEGORY_STYLES.at(-1);
 }
 
-function render(call){
-  const now = Date.now()/1000;
+let painted = null;                                    // what's currently in the DOM
+const keyOf = c => c ? `${c.dept}|${c.type}|${c.address}|${c.ts}` : 'idle';
 
-  if(!call || (now - call.ts) > FADE_AFTER*1.5){
-    document.body.classList.remove('active');
-    bar.style.width = '0';
-    el.innerHTML = `
+function paintIdle(){
+  document.body.classList.remove('active');
+  el.classList.remove('stale');
+  bar.style.width = '0';
+  el.innerHTML = `
       <div class="idle">
         <div class="glyph">&#9679;&#8202;&#9679;&#8202;&#9679;</div>
         <div class="msg">No active call</div>
         <div class="sub">listening</div>
       </div>`;
-    document.getElementById('fdept').textContent = '';
-    return;
-  }
+  document.getElementById('fdept').textContent = '';
+}
 
-  const s = styleFor(call.type);
-  document.documentElement.style.setProperty('--accent', s.accent);
+function paintCall(call){
+  document.documentElement.style.setProperty('--accent', styleFor(call.type).accent);
   document.body.classList.add('active');
-
-  const age = Math.max(0, now - call.ts);
-  bar.style.width = (100 - Math.min(100, age/FADE_AFTER*100)) + '%';
-
   const units = (call.units||[]).map(u =>
     `<span class="unit ${HOME_UNITS.test(u)?'home':''}">${esc(u)}</span>`).join('');
-
   el.innerHTML = `
     <div class="eyebrow"><span class="dot"></span>${esc(call.dept||'Dispatch')}</div>
     <h1 class="calltype">${esc(call.type||'Unknown call')}</h1>
     <div class="address">${esc(call.address||'')}${
        call.city?`<span class="city">${esc(call.city)}</span>`:''}</div>
     ${units?`<div class="units">${units}</div>`:''}`;
+}
 
+/* Cheap. Text and widths only — no innerHTML, so nothing re-animates. */
+function tick(){
+  document.getElementById('fclock').textContent =
+    new Date().toLocaleTimeString([], {hour:'numeric', minute:'2-digit'});
+  if(painted === 'idle' || !current) return;
+  const age = Math.max(0, Date.now()/1000 - current.ts);
+  bar.style.width = (100 - Math.min(100, age/FADE_AFTER*100)) + '%';
   el.classList.toggle('stale', age > FADE_AFTER);
   document.getElementById('fdept').textContent = ago(age);
+}
+
+function render(call){
+  const expired = call && (Date.now()/1000 - call.ts) > FADE_AFTER*1.5;
+  const live = expired ? null : call;
+  const k = keyOf(live);
+  if(k !== painted){                 // rebuild ONLY when the call actually changes
+    painted = k;
+    live ? paintCall(live) : paintIdle();
+  }
+  tick();
 }
 
 const esc = t => String(t??'').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
 const ago = a => a<60 ? `${a|0}s ago` : `${(a/60)|0}m ago`;
 
-setInterval(()=>{
-  document.getElementById('fclock').textContent =
-    new Date().toLocaleTimeString([], {hour:'numeric', minute:'2-digit'});
-  if(current) render(current);
-}, 1000);
+setInterval(() => { current ? render(current) : tick(); }, 1000);
 
 /* ---------------- data source ---------------- */
 /* Tries the local server; if unreachable (e.g. you opened this file
