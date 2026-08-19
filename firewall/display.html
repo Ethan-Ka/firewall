@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>firewall</title>
+<style>
+/* ============================================================
+   firewall — display layer.
+   Edit freely and just refresh; the server re-reads this file
+   on every request. The ONLY contract with the backend is the
+   call object shape documented in the README.
+
+   DESIGN KNOBS — everything visual lives here. Tweak freely.
+   The layout is deliberately a single centered stack so you can
+   restyle without fighting a grid. Nothing below is load-bearing.
+   ============================================================ */
+:root{
+  --bg:#0a0b0d;
+  --bg-glow:#12151a;
+  --fg:#f2f4f7;
+  --fg-dim:#7d848f;
+  --fg-faint:#454b55;
+  --rule:#1e222a;
+
+  /* call-type accents — set per category in JS: CATEGORY_STYLES */
+  --accent:#ff8a3d;
+
+  --font-display:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Inter,sans-serif;
+  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+
+  --size-eyebrow:clamp(11px,1.4vw,15px);
+  --size-type:clamp(38px,8.5vw,104px);
+  --size-addr:clamp(19px,3.2vw,40px);
+  --size-meta:clamp(12px,1.6vw,17px);
+
+  --stack-gap:clamp(14px,2.4vh,30px);
+  --pad:clamp(20px,4vw,64px);
+  --radius:10px;
+
+  --fade-after:600;   /* seconds until a call is considered stale */
+}
+
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  background:var(--bg);
+  color:var(--fg);
+  font-family:var(--font-display);
+  -webkit-font-smoothing:antialiased;
+  overflow:hidden;
+  cursor:none;
+}
+/* soft accent bloom behind the stack */
+body::before{
+  content:"";position:fixed;inset:0;pointer-events:none;
+  background:radial-gradient(ellipse 90% 70% at 50% 42%,
+    color-mix(in oklab,var(--accent) 13%,transparent) 0%, transparent 70%);
+  opacity:0;transition:opacity 1.2s ease;
+}
+body.active::before{opacity:1}
+
+#screen{
+  height:100%;
+  display:flex;flex-direction:column;
+  align-items:center;justify-content:center;   /* ← centered, as requested */
+  text-align:center;
+  padding:var(--pad);
+  gap:var(--stack-gap);
+}
+
+/* ---------- ACTIVE CALL ---------- */
+.eyebrow{
+  font-family:var(--font-mono);
+  font-size:var(--size-eyebrow);
+  letter-spacing:.22em;text-transform:uppercase;
+  color:var(--accent);
+  display:flex;align-items:center;gap:.75em;
+}
+.dot{
+  width:.6em;height:.6em;border-radius:50%;
+  background:var(--accent);
+  animation:pulse 1.9s ease-in-out infinite;
+}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.35;transform:scale(.82)}}
+
+.calltype{
+  font-size:var(--size-type);
+  font-weight:680;
+  line-height:.98;
+  letter-spacing:-.028em;
+  text-wrap:balance;
+  max-width:16ch;
+}
+.address{
+  font-size:var(--size-addr);
+  font-weight:380;
+  line-height:1.22;
+  color:var(--fg-dim);
+  text-wrap:balance;
+  max-width:22ch;
+}
+.address .city{color:var(--fg-faint);font-size:.7em;display:block;margin-top:.35em;letter-spacing:.04em}
+
+.units{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:4px}
+.unit{
+  font-family:var(--font-mono);
+  font-size:var(--size-meta);
+  letter-spacing:.06em;
+  padding:.42em .8em;
+  border:1px solid var(--rule);
+  border-radius:var(--radius);
+  color:var(--fg-dim);
+  background:#ffffff05;
+}
+.unit.home{border-color:var(--accent);color:var(--accent);background:color-mix(in oklab,var(--accent) 10%,transparent)}
+
+.footer{
+  position:fixed;left:0;right:0;bottom:0;
+  padding:var(--pad);
+  display:flex;justify-content:space-between;align-items:flex-end;
+  font-family:var(--font-mono);font-size:var(--size-meta);
+  color:var(--fg-faint);letter-spacing:.08em;
+}
+/* freshness bar — drains over --fade-after seconds */
+#age{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;transition:width 1s linear;opacity:.8}
+
+/* ---------- IDLE ---------- */
+.idle{display:flex;flex-direction:column;align-items:center;gap:var(--stack-gap)}
+.idle .glyph{font-size:clamp(30px,5vw,58px);color:var(--fg-faint);letter-spacing:.3em}
+.idle .msg{font-size:var(--size-addr);color:var(--fg-faint);font-weight:340}
+.idle .sub{font-family:var(--font-mono);font-size:var(--size-meta);color:#2c313a;letter-spacing:.18em;text-transform:uppercase}
+
+/* ---------- transitions ---------- */
+#screen>*{animation:rise .55s cubic-bezier(.22,.9,.3,1) both}
+@keyframes rise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+.stale{opacity:.42;filter:saturate(.4);transition:opacity 2s,filter 2s}
+
+#demobadge{
+  position:fixed;top:12px;right:14px;z-index:9;
+  font-family:var(--font-mono);font-size:10px;letter-spacing:.18em;
+  color:#3a4049;border:1px solid #23272f;border-radius:6px;padding:4px 8px;
+}
+</style>
+</head>
+<body>
+<div id="age"></div>
+<div id="screen"></div>
+<div class="footer"><span id="fdept"></span><span id="fclock"></span></div>
+<div id="demobadge" hidden></div>
+
+<script>
+/* ============================================================
+   CATEGORY STYLES — the accent + label per kind of call.
+   Add/rename freely; `match` is tested against the call type text.
+   ============================================================ */
+const CATEGORY_STYLES = [
+  {key:'fire',    accent:'#ff5c33', match:/fire|smoke|alarm|burn|arcing/i},
+  {key:'medical', accent:'#3ba3ff', match:/medic|ems|chest|breath|cardiac|fall|unconscious|seizure|overdose|sick/i},
+  {key:'crash',   accent:'#ffc53d', match:/mva|crash|accident|collision|extric|pi\b/i},
+  {key:'rescue',  accent:'#9d7bff', match:/rescue|entrap|water|elevator|lift assist/i},
+  {key:'hazmat',  accent:'#3ddc97', match:/hazmat|gas|carbon monoxide|co alarm|spill|leak/i},
+  {key:'other',   accent:'#ff8a3d', match:/.*/},
+];
+
+/* Units from stations that would route past you. Highlighted on screen. */
+const HOME_UNITS = /^(E2|M2|L1|E11)$/i;
+
+let FADE_AFTER = 600; // seconds; overridden by the server's hold_seconds
+
+const el  = document.getElementById('screen');
+const bar = document.getElementById('age');
+let current = null, demoMode = false, demoIndex = 0;
+
+/* ---------------- rendering ---------------- */
+function styleFor(type){
+  return CATEGORY_STYLES.find(c => c.match.test(type || '')) || CATEGORY_STYLES.at(-1);
+}
+
+function render(call){
+  const now = Date.now()/1000;
+
+  if(!call || (now - call.ts) > FADE_AFTER*1.5){
+    document.body.classList.remove('active');
+    bar.style.width = '0';
+    el.innerHTML = `
+      <div class="idle">
+        <div class="glyph">&#9679;&#8202;&#9679;&#8202;&#9679;</div>
+        <div class="msg">No active call</div>
+        <div class="sub">listening</div>
+      </div>`;
+    document.getElementById('fdept').textContent = '';
+    return;
+  }
+
+  const s = styleFor(call.type);
+  document.documentElement.style.setProperty('--accent', s.accent);
+  document.body.classList.add('active');
+
+  const age = Math.max(0, now - call.ts);
+  bar.style.width = (100 - Math.min(100, age/FADE_AFTER*100)) + '%';
+
+  const units = (call.units||[]).map(u =>
+    `<span class="unit ${HOME_UNITS.test(u)?'home':''}">${esc(u)}</span>`).join('');
+
+  el.innerHTML = `
+    <div class="eyebrow"><span class="dot"></span>${esc(call.dept||'Dispatch')}</div>
+    <h1 class="calltype">${esc(call.type||'Unknown call')}</h1>
+    <div class="address">${esc(call.address||'')}${
+       call.city?`<span class="city">${esc(call.city)}</span>`:''}</div>
+    ${units?`<div class="units">${units}</div>`:''}`;
+
+  el.classList.toggle('stale', age > FADE_AFTER);
+  document.getElementById('fdept').textContent = ago(age);
+}
+
+const esc = t => String(t??'').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+const ago = a => a<60 ? `${a|0}s ago` : `${(a/60)|0}m ago`;
+
+setInterval(()=>{
+  document.getElementById('fclock').textContent =
+    new Date().toLocaleTimeString([], {hour:'numeric', minute:'2-digit'});
+  if(current) render(current);
+}, 1000);
+
+/* ---------------- data source ---------------- */
+/* Tries the local server; if unreachable (e.g. you opened this file
+   directly to work on the design), falls back to demo data. */
+const DEMO = [
+  {dept:'West Lafayette FD',  type:'Structure Fire',            address:'340 Sagamore Pkwy W',  city:'West Lafayette', units:['E2','E3','L1','BC1']},
+  {dept:'Purdue FD',          type:'Medical — Chest Pain',      address:'Cary Quadrangle',      city:'Purdue Campus',  units:['M2','E11']},
+  {dept:'West Lafayette FD',  type:'Vehicle Crash w/ Injuries', address:'US-231 at Airport Rd', city:'West Lafayette', units:['E2','M2','L1']},
+  {dept:'Purdue FD',          type:'Automatic Fire Alarm',      address:'Wetherill Lab of Chemistry', city:'Purdue Campus', units:['E11']},
+  {dept:'Tippecanoe County',  type:'Carbon Monoxide Alarm',     address:'1820 Cumberland Ave',  city:'West Lafayette', units:['E3']},
+  null, // idle state
+];
+
+function showDemo(i){
+  const d = DEMO[((i % DEMO.length) + DEMO.length) % DEMO.length];
+  current = d ? {...d, ts: Date.now()/1000} : null;
+  render(current);
+  const b = document.getElementById('demobadge');
+  b.hidden = false;
+  b.textContent = `DEMO ${((i%DEMO.length)+DEMO.length)%DEMO.length+1}/${DEMO.length} — SPACE to cycle`;
+}
+
+async function poll(){
+  try{
+    const r = await fetch('/api/current', {cache:'no-store'});
+    if(!r.ok) throw 0;
+    if(demoMode){ demoMode=false; document.getElementById('demobadge').hidden=true; }
+    const j = await r.json();
+    if(j.hold_seconds) FADE_AFTER = j.hold_seconds;
+    current = j.call || null;
+    render(current);
+  }catch(e){
+    if(!demoMode){ demoMode = true; showDemo(demoIndex); }
+  }
+}
+poll();
+setInterval(poll, 2000);
+
+/* SPACE cycles demo states so you can design each one. D forces demo mode. */
+addEventListener('keydown', e=>{
+  if(e.code==='Space'){ e.preventDefault(); demoMode=true; showDemo(++demoIndex); }
+  if(e.key==='d'){ demoMode=true; showDemo(demoIndex); }
+});
+</script>
+</body>
+</html>

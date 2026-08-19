@@ -1,0 +1,23 @@
+[project]
+name = "firewall"
+version = "0.1.0"
+description = "Ambient display showing what call the fire truck driving past your house is running"
+requires-python = ">=3.10"
+dependencies = ["requests>=2.31"]
+
+[project.optional-dependencies]
+listen = ["faster-whisper>=1.0"]   # needed for any real audio source
+llm    = ["anthropic>=0.40"]       # optional smarter transcript parser
+
+[project.scripts]
+firewall = "firewall.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["firewall"]
+
+[tool.setuptools.package-data]
+firewall = ["display.html"]

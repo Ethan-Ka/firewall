@@ -1,0 +1,19 @@
+{
+  "bcfy_api_key": "PASTE_FROM_bcfy.io/dev/apply",
+  "bcfy_system_id": "VERIFY_AT_bcfy.io/dev/docs",
+  "bcfy_api_base": "https://api.bcfy.io/v1",
+
+  "talkgroups": {
+    "2105": "Purdue FD",
+    "2021": "West Lafayette FD",
+    "1901": "Lafayette FD",
+    "1827": "Tippecanoe County Fire",
+    "1833": "Tippecanoe EMS"
+  },
+
+  "poll_seconds": 5,
+  "whisper_model": "base.en",
+  "trunk_dir": "./trunk-out",
+  "port": 842,
+  "use_llm_parser": false
+}
