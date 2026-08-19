@@ -1,284 +1,366 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>firewall</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
-/* ============================================================
-   firewall — display layer.
-   Edit freely and just refresh; the server re-reads this file
-   on every request. The ONLY contract with the backend is the
-   call object shape documented in the README.
+/* ===========================================================================
+   firewall display layer.
 
-   DESIGN KNOBS — everything visual lives here. Tweak freely.
-   The layout is deliberately a single centered stack so you can
-   restyle without fighting a grid. Nothing below is load-bearing.
-   ============================================================ */
+   Built against standardized-design-system. Token values are vendored below
+   so this file stays standalone (it has to run from file:// with nothing
+   else installed). Names match tokens/tokens.json; do not invent new hex.
+
+   Two deliberate decisions, stated rather than defaulted:
+
+   1. Dark theme, set explicitly via data-theme="dark" on <html>, not
+      silently. Reason: this is an always-on screen in a hallway, and a
+      light surface at 3am is unusable. Light theme is one attribute away.
+   2. Two families. IBM Plex Sans for everything readable, IBM Plex Mono
+      for unit designators and clock only, because those are fixed-width
+      codes and align in a column. Mono is never used for prose here.
+
+   Contrast, measured against --surface (n-900 #1A1917):
+     n-0      17.57:1     n-100    15.02:1     n-300     9.67:1
+     pine-300  9.35:1     clay-300  8.67:1
+   All clear WCAG AA for both body and large text.
+   =========================================================================== */
 :root{
-  --bg:#0a0b0d;
-  --bg-glow:#12151a;
-  --fg:#f2f4f7;
-  --fg-dim:#7d848f;
-  --fg-faint:#454b55;
-  --rule:#1e222a;
+  /* neutral ramp */
+  --n-0:#FFFFFF; --n-100:#EFEDE8; --n-300:#C4C0B5; --n-700:#413E38;
+  --n-800:#2A2825; --n-900:#1A1917;
+  /* accents: clay carries hazard, pine carries EMS. Neither is indigo. */
+  --clay-300:#E8A791; --pine-300:#7ECBBF;
 
-  /* call-type accents — set per category in JS: CATEGORY_STYLES */
-  --accent:#ff8a3d;
+  --surface:var(--n-900);
+  --border:var(--n-700);
+  --text:var(--n-0);
+  --text-body:var(--n-100);
+  --text-muted:var(--n-300);
+  --tone:var(--n-300);            /* repointed per call category */
 
-  --font-display:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Inter,sans-serif;
-  --font-mono:ui-monospace,"SF Mono",Menlo,monospace;
+  --font-sans:'IBM Plex Sans','Public Sans',system-ui,sans-serif;
+  --font-mono:'IBM Plex Mono',ui-monospace,monospace;
 
-  --size-eyebrow:clamp(11px,1.4vw,15px);
-  --size-type:clamp(38px,8.5vw,104px);
-  --size-addr:clamp(19px,3.2vw,40px);
-  --size-meta:clamp(12px,1.6vw,17px);
+  --text-sm:0.9375rem; --text-base:1.0625rem; --text-xl:1.5rem;
+  --text-3xl:2.375rem; --text-5xl:3.75rem;
+  --lh-tight:1.15; --lh-snug:1.3; --tracking-tight:-0.02em;
 
-  --stack-gap:clamp(14px,2.4vh,30px);
-  --pad:clamp(20px,4vw,64px);
-  --radius:10px;
+  --sp-1:.25rem; --sp-2:.5rem; --sp-3:.75rem; --sp-4:1rem;
+  --sp-6:1.5rem; --sp-8:2rem; --sp-12:3rem; --sp-16:4rem;
 
-  --fade-after:600;   /* seconds until a call is considered stale */
+  --r-md:4px;                      /* one radius, held everywhere */
+  --dur-fast:140ms; --dur-base:220ms;
+  --ease-standard:cubic-bezier(.2,0,0,1);
+
+  --focus-color:var(--pine-300); --focus-width:2px; --focus-offset:2px;
 }
 
-*{box-sizing:border-box;margin:0;padding:0}
-html,body{height:100%}
+*,*::before,*::after{box-sizing:border-box}
+html,body{height:100%;margin:0}
 body{
-  background:var(--bg);
-  color:var(--fg);
-  font-family:var(--font-display);
+  background:var(--surface);
+  color:var(--text-body);
+  font-family:var(--font-sans);
+  font-size:var(--text-base);
   -webkit-font-smoothing:antialiased;
   overflow:hidden;
   cursor:none;
 }
-/* soft accent bloom behind the stack */
-body::before{
-  content:"";position:fixed;inset:0;pointer-events:none;
-  background:radial-gradient(ellipse 90% 70% at 50% 42%,
-    color-mix(in oklab,var(--accent) 13%,transparent) 0%, transparent 70%);
-  opacity:0;transition:opacity 1.2s ease;
-}
-body.active::before{opacity:1}
 
+/* Asymmetric on purpose: the block sits low and left, the meta reads from
+   the opposite corner. Nothing here is mirrored about the centre line. */
 #screen{
   height:100%;
-  display:flex;flex-direction:column;
-  align-items:center;justify-content:center;   /* ← centered, as requested */
-  text-align:center;
-  padding:var(--pad);
-  gap:var(--stack-gap);
+  display:grid;
+  grid-template-rows:1fr auto;
+  padding:var(--sp-8) var(--sp-12) var(--sp-8) var(--sp-16);
 }
+@media (max-width:768px){ #screen{padding:var(--sp-6)} }
 
-/* ---------- ACTIVE CALL ---------- */
-.eyebrow{
-  font-family:var(--font-mono);
-  font-size:var(--size-eyebrow);
-  letter-spacing:.22em;text-transform:uppercase;
-  color:var(--accent);
-  display:flex;align-items:center;gap:.75em;
-}
-.dot{
-  width:.6em;height:.6em;border-radius:50%;
-  background:var(--accent);
-  animation:pulse 1.9s ease-in-out infinite;
-}
-@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.35;transform:scale(.82)}}
+/* freshness: drains left to right over hold_seconds */
+#age{position:fixed;top:0;left:0;height:2px;width:0;background:var(--tone);
+     transition:width 1s linear}
 
-.calltype{
-  font-size:var(--size-type);
-  font-weight:680;
-  line-height:.98;
-  letter-spacing:-.028em;
+/* ---------------- call ---------------- */
+.call{align-self:end}          /* content sits low, not centred */
+h1{
+  margin:0;
+  font-size:clamp(2.375rem,7.5vw,5rem);
+  font-weight:600;
+  line-height:var(--lh-tight);
+  letter-spacing:var(--tracking-tight);
+  color:var(--text);
   text-wrap:balance;
-  max-width:16ch;
+  max-width:13ch;                /* in ch, so it tracks the headline size */
 }
-.address{
-  font-size:var(--size-addr);
-  font-weight:380;
-  line-height:1.22;
-  color:var(--fg-dim);
-  text-wrap:balance;
-  max-width:22ch;
+/* Grouping by uneven spacing: address hugs the headline, the attribution
+   line sits a full step further away, units further still. */
+.address{margin:var(--sp-3) 0 0;font-size:clamp(1.25rem,2.6vw,2rem);
+         line-height:var(--lh-snug);color:var(--text-body);max-width:19ch}
+.city{display:block;margin-top:var(--sp-1);color:var(--text-muted);
+       font-size:var(--text-xl);line-height:1.2}
+
+/* Attribution sits BELOW the headline, not above it as an eyebrow label,
+   and is sentence case. Category is spelled out so colour is never the
+   only signal of what kind of call this is. */
+.attrib{margin-top:var(--sp-8);font-size:var(--text-base);color:var(--text-muted)}
+.attrib .cat{color:var(--tone);font-weight:500}
+
+.units{margin-top:var(--sp-4);display:flex;flex-wrap:wrap;gap:var(--sp-2);
+       padding:0;list-style:none}
+.units li{
+  font-family:var(--font-mono);font-size:var(--text-sm);
+  padding:var(--sp-1) var(--sp-3);border:1px solid var(--border);
+  border-radius:var(--r-md);color:var(--text-muted);
 }
-.address .city{color:var(--fg-faint);font-size:.7em;display:block;margin-top:.35em;letter-spacing:.04em}
+/* Rigs that pass your house: heavier weight AND colour AND a leading rule,
+   so the distinction survives a colourblind viewer. */
+.units li.home{color:var(--tone);border-color:var(--tone);font-weight:500}
+.units li.home::before{content:"";display:inline-block;width:.42em;height:.42em;
+  background:var(--tone);vertical-align:baseline;margin-right:.5em}
 
-.units{display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:4px}
-.unit{
-  font-family:var(--font-mono);
-  font-size:var(--size-meta);
-  letter-spacing:.06em;
-  padding:.42em .8em;
-  border:1px solid var(--rule);
-  border-radius:var(--radius);
-  color:var(--fg-dim);
-  background:#ffffff05;
+/* ---------------- meta row ---------------- */
+.meta{display:flex;justify-content:space-between;align-items:baseline;
+      margin-top:var(--sp-12);font-family:var(--font-mono);
+      font-size:var(--text-sm);color:var(--text-muted)}
+.meta .right{text-align:right}
+
+/* ---------------- non-happy states ---------------- */
+.state{align-self:end}
+.state h2{margin:0;font-size:var(--text-3xl);font-weight:600;
+          letter-spacing:var(--tracking-tight);color:var(--text)}
+.state p{margin:var(--sp-3) 0 0;max-width:46ch;color:var(--text-muted);
+         line-height:1.5}
+.state .fix{margin-top:var(--sp-4);font-family:var(--font-mono);
+            font-size:var(--text-sm);color:var(--text-body);
+            border-left:1px solid var(--border);padding-left:var(--sp-3)}
+.state.error h2{color:var(--clay-300)}
+
+/* loading: a real indeterminate indicator, not a spinner on everything */
+.pending{width:5rem;height:2px;background:var(--n-800);overflow:hidden;
+         margin-bottom:var(--sp-6)}
+.pending i{display:block;width:40%;height:100%;background:var(--text-muted);
+           animation:sweep 1.1s var(--ease-standard) infinite}
+@keyframes sweep{from{transform:translateX(-100%)}to{transform:translateX(250%)}}
+
+.stale{opacity:.55}
+
+/* one entrance, 220ms, only when the content actually changes */
+#screen>*{animation:enter var(--dur-base) var(--ease-standard) both}
+@keyframes enter{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+
+:where(a,button,[tabindex]):focus-visible{
+  outline:var(--focus-width) solid var(--focus-color);
+  outline-offset:var(--focus-offset);border-radius:var(--r-md);
 }
-.unit.home{border-color:var(--accent);color:var(--accent);background:color-mix(in oklab,var(--accent) 10%,transparent)}
 
-.footer{
-  position:fixed;left:0;right:0;bottom:0;
-  padding:var(--pad);
-  display:flex;justify-content:space-between;align-items:flex-end;
-  font-family:var(--font-mono);font-size:var(--size-meta);
-  color:var(--fg-faint);letter-spacing:.08em;
-}
-/* freshness bar — drains over --fade-after seconds */
-#age{position:fixed;top:0;left:0;height:2px;background:var(--accent);width:0;transition:width 1s linear;opacity:.8}
+#mode{position:fixed;top:var(--sp-4);right:var(--sp-4);
+  font-family:var(--font-mono);font-size:var(--text-sm);color:var(--text-muted);
+  border:1px solid var(--border);border-radius:var(--r-md);
+  padding:var(--sp-1) var(--sp-2);background:none}
+#mode[hidden]{display:none}
 
-/* ---------- IDLE ---------- */
-.idle{display:flex;flex-direction:column;align-items:center;gap:var(--stack-gap)}
-.idle .glyph{font-size:clamp(30px,5vw,58px);color:var(--fg-faint);letter-spacing:.3em}
-.idle .msg{font-size:var(--size-addr);color:var(--fg-faint);font-weight:340}
-.idle .sub{font-family:var(--font-mono);font-size:var(--size-meta);color:#2c313a;letter-spacing:.18em;text-transform:uppercase}
-
-/* ---------- transitions ---------- */
-#screen>*{animation:rise .55s cubic-bezier(.22,.9,.3,1) both}
-@keyframes rise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
-.stale{opacity:.42;filter:saturate(.4);transition:opacity 2s,filter 2s}
-
-#demobadge{
-  position:fixed;top:12px;right:14px;z-index:9;
-  font-family:var(--font-mono);font-size:10px;letter-spacing:.18em;
-  color:#3a4049;border:1px solid #23272f;border-radius:6px;padding:4px 8px;
+@media (prefers-reduced-motion:reduce){
+  *,*::before,*::after{animation-duration:.01ms!important;
+    animation-iteration-count:1!important;transition-duration:.01ms!important}
 }
 </style>
 </head>
 <body>
 <div id="age"></div>
-<div id="screen"></div>
-<div class="footer"><span id="fdept"></span><span id="fclock"></span></div>
-<div id="demobadge" hidden></div>
+<main id="screen"></main>
+<button id="mode" hidden type="button"></button>
 
 <script>
-/* ============================================================
-   CATEGORY STYLES — the accent + label per kind of call.
-   Add/rename freely; `match` is tested against the call type text.
-   ============================================================ */
-const CATEGORY_STYLES = [
-  {key:'fire',    accent:'#ff5c33', match:/fire|smoke|alarm|burn|arcing/i},
-  {key:'medical', accent:'#3ba3ff', match:/medic|ems|chest|breath|cardiac|fall|unconscious|seizure|overdose|sick/i},
-  {key:'crash',   accent:'#ffc53d', match:/mva|crash|accident|collision|extric|pi\b/i},
-  {key:'rescue',  accent:'#9d7bff', match:/rescue|entrap|water|elevator|lift assist/i},
-  {key:'hazmat',  accent:'#3ddc97', match:/hazmat|gas|carbon monoxide|co alarm|spill|leak/i},
-  {key:'other',   accent:'#ff8a3d', match:/.*/},
+/* ---------------------------------------------------------------------------
+   Category -> label + tone. Colour is paired with the spelled-out label in
+   every render, so it is never the only carrier of meaning.
+   Two accents only: clay for the hazard family, pine for the EMS family.
+   --------------------------------------------------------------------------- */
+const CATEGORIES = [
+  {label:'Fire',    tone:'var(--clay-300)', match:/fire|smoke|burn|arcing|wires/i},
+  {label:'Hazmat',  tone:'var(--clay-300)', match:/hazmat|gas|carbon monoxide|co alarm|spill|leak/i},
+  {label:'Alarm',   tone:'var(--clay-300)', match:/alarm/i},
+  {label:'Crash',   tone:'var(--clay-300)', match:/crash|collision|mva|accident|extric/i},
+  {label:'Medical', tone:'var(--pine-300)', match:/medic|ems|chest|breath|cardiac|fall|unconscious|seizure|overdose|sick/i},
+  {label:'Rescue',  tone:'var(--pine-300)', match:/rescue|entrap|water|elevator|lift assist/i},
+  {label:'Call',    tone:'var(--n-300)',    match:/.*/},
 ];
 
-/* Units from stations that would route past you. Highlighted on screen. */
+/* Rigs from the stations that route past the house. */
 const HOME_UNITS = /^(E2|M2|L1|E11)$/i;
 
-let FADE_AFTER = 600; // seconds; overridden by the server's hold_seconds
-
-const el  = document.getElementById('screen');
+let FADE_AFTER = 600;              // overridden by the server's hold_seconds
+const el = document.getElementById('screen');
 const bar = document.getElementById('age');
-let current = null, demoMode = false, demoIndex = 0;
+const modeBtn = document.getElementById('mode');
 
-/* ---------------- rendering ----------------
-   Split deliberately: paint*() rebuilds the DOM (and therefore replays the
-   entrance animation), tick() only nudges text and widths. The per-second
-   clock must never call paint*(), or the whole stack re-animates every second.
-   ------------------------------------------------------------------------ */
-function styleFor(type){
-  return CATEGORY_STYLES.find(c => c.match.test(type || '')) || CATEGORY_STYLES.at(-1);
-}
+let current = null, painted = null, mode = 'boot', demoIndex = 0, lastError = null;
 
-let painted = null;                                    // what's currently in the DOM
-const keyOf = c => c ? `${c.dept}|${c.type}|${c.address}|${c.ts}` : 'idle';
+const esc = t => String(t??'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+const ago = a => a<60 ? `${a|0}s ago` : `${(a/60)|0}m ago`;
+const catOf = t => CATEGORIES.find(c=>c.match.test(t||'')) || CATEGORIES.at(-1);
 
-function paintIdle(){
-  document.body.classList.remove('active');
-  el.classList.remove('stale');
-  bar.style.width = '0';
-  el.innerHTML = `
-      <div class="idle">
-        <div class="glyph">&#9679;&#8202;&#9679;&#8202;&#9679;</div>
-        <div class="msg">No active call</div>
-        <div class="sub">listening</div>
-      </div>`;
-  document.getElementById('fdept').textContent = '';
+/* ---------- painters: these rebuild the DOM, so they run only on change ---- */
+function metaRow(right){
+  return `<div class="meta"><span id="fleft"></span>
+          <span class="right">${right||''}</span></div>`;
 }
 
 function paintCall(call){
-  document.documentElement.style.setProperty('--accent', styleFor(call.type).accent);
-  document.body.classList.add('active');
+  const c = catOf(call.type);
+  document.documentElement.style.setProperty('--tone', c.tone);
   const units = (call.units||[]).map(u =>
-    `<span class="unit ${HOME_UNITS.test(u)?'home':''}">${esc(u)}</span>`).join('');
+    `<li class="${HOME_UNITS.test(u)?'home':''}">${esc(u)}</li>`).join('');
   el.innerHTML = `
-    <div class="eyebrow"><span class="dot"></span>${esc(call.dept||'Dispatch')}</div>
-    <h1 class="calltype">${esc(call.type||'Unknown call')}</h1>
-    <div class="address">${esc(call.address||'')}${
-       call.city?`<span class="city">${esc(call.city)}</span>`:''}</div>
-    ${units?`<div class="units">${units}</div>`:''}`;
+    <div class="call">
+      <h1>${esc(call.type||'Dispatch')}</h1>
+      ${call.address?`<p class="address">${esc(call.address)}${
+        call.city?`<span class="city">${esc(call.city)}</span>`:''}</p>`:''}
+      <p class="attrib">${esc(call.dept||'Dispatch')} <span class="cat">${c.label}</span></p>
+      ${units?`<ul class="units">${units}</ul>`:''}
+    </div>
+    ${metaRow('<span id="fclock"></span>')}`;
 }
 
-/* Cheap. Text and widths only — no innerHTML, so nothing re-animates. */
+function paintIdle(){
+  document.documentElement.style.setProperty('--tone','var(--n-300)');
+  bar.style.width='0';
+  el.innerHTML = `
+    <div class="state">
+      <h2>Nothing running</h2>
+      <p>No dispatch on the watched talkgroups in the last ten minutes.
+         The next one will appear here on its own.</p>
+    </div>
+    ${metaRow('<span id="fclock"></span>')}`;
+}
+
+function paintBoot(){
+  el.innerHTML = `
+    <div class="state">
+      <div class="pending"><i></i></div>
+      <h2>Starting up</h2>
+      <p>Connecting to the dispatch source.</p>
+    </div>
+    ${metaRow('<span id="fclock"></span>')}`;
+}
+
+/* Error state names the failure and the fix, per the audit checklist. */
+function paintError(info){
+  document.documentElement.style.setProperty('--tone','var(--clay-300)');
+  bar.style.width='0';
+  el.innerHTML = `
+    <div class="state error">
+      <h2>${esc(info.title)}</h2>
+      <p>${esc(info.detail)}</p>
+      <p class="fix">${esc(info.fix)}</p>
+    </div>
+    ${metaRow('<span id="fclock"></span>')}`;
+}
+
+/* ---------- tick: text and widths only, never innerHTML ------------------- */
 function tick(){
-  document.getElementById('fclock').textContent =
+  const clock = document.getElementById('fclock');
+  if(clock) clock.textContent =
     new Date().toLocaleTimeString([], {hour:'numeric', minute:'2-digit'});
-  if(painted === 'idle' || !current) return;
-  const age = Math.max(0, Date.now()/1000 - current.ts);
-  bar.style.width = (100 - Math.min(100, age/FADE_AFTER*100)) + '%';
-  el.classList.toggle('stale', age > FADE_AFTER);
-  document.getElementById('fdept').textContent = ago(age);
+  const left = document.getElementById('fleft');
+  if(!left) return;
+  if(mode === 'call' && current){
+    const age = Math.max(0, Date.now()/1000 - current.ts);
+    bar.style.width = (100 - Math.min(100, age/FADE_AFTER*100)) + '%';
+    el.classList.toggle('stale', age > FADE_AFTER);
+    left.textContent = ago(age);
+  } else {
+    el.classList.remove('stale');
+    left.textContent = mode === 'error' ? 'source down'
+                     : mode === 'boot'  ? '' : 'listening';
+  }
 }
 
-function render(call){
-  const expired = call && (Date.now()/1000 - call.ts) > FADE_AFTER*1.5;
-  const live = expired ? null : call;
-  const k = keyOf(live);
-  if(k !== painted){                 // rebuild ONLY when the call actually changes
-    painted = k;
-    live ? paintCall(live) : paintIdle();
+/* ---------- one entry point decides which state is on screen -------------- */
+function render(){
+  let key;
+  if(mode === 'boot')       key = 'boot';
+  else if(mode === 'error') key = 'error:' + lastError;
+  else if(current && (Date.now()/1000 - current.ts) <= FADE_AFTER*1.5)
+                            key = `call|${current.dept}|${current.type}|${current.address}|${current.ts}`;
+  else { mode = 'idle';     key = 'idle'; }
+
+  if(key !== painted){
+    painted = key;
+    if(key === 'boot') paintBoot();
+    else if(mode === 'error') paintError(errorInfo());
+    else if(key === 'idle') paintIdle();
+    else { mode = 'call'; paintCall(current); }
   }
   tick();
 }
 
-const esc = t => String(t??'').replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
-const ago = a => a<60 ? `${a|0}s ago` : `${(a/60)|0}m ago`;
+function errorInfo(){
+  if(lastError === 'unreachable') return {
+    title:'Display is not connected',
+    detail:'Nothing is answering on this port, so no calls can arrive.',
+    fix:'Run: python3 -m firewall'};
+  return {
+    title:'Dispatch source is failing',
+    detail:'firewall is running but the audio source stopped returning calls. '
+         + 'The last error it reported is below.',
+    fix:String(lastError||'unknown error')};
+}
 
-setInterval(() => { current ? render(current) : tick(); }, 1000);
+setInterval(() => render(), 1000);
 
-/* ---------------- data source ---------------- */
-/* Tries the local server; if unreachable (e.g. you opened this file
-   directly to work on the design), falls back to demo data. */
+/* ---------- data ---------------------------------------------------------- */
 const DEMO = [
-  {dept:'West Lafayette FD',  type:'Structure Fire',            address:'340 Sagamore Pkwy W',  city:'West Lafayette', units:['E2','E3','L1','BC1']},
-  {dept:'Purdue FD',          type:'Medical — Chest Pain',      address:'Cary Quadrangle',      city:'Purdue Campus',  units:['M2','E11']},
-  {dept:'West Lafayette FD',  type:'Vehicle Crash w/ Injuries', address:'US-231 at Airport Rd', city:'West Lafayette', units:['E2','M2','L1']},
-  {dept:'Purdue FD',          type:'Automatic Fire Alarm',      address:'Wetherill Lab of Chemistry', city:'Purdue Campus', units:['E11']},
-  {dept:'Tippecanoe County',  type:'Carbon Monoxide Alarm',     address:'1820 Cumberland Ave',  city:'West Lafayette', units:['E3']},
-  null, // idle state
+  {dept:'West Lafayette FD', type:'Structure Fire',        address:'340 Sagamore Parkway West', city:'West Lafayette', units:['E2','E3','L1','BC1']},
+  {dept:'Purdue FD',         type:'Medical: Chest Pain',   address:'Cary Quadrangle',           city:'Purdue campus',  units:['M2','E11']},
+  {dept:'West Lafayette FD', type:'Vehicle Crash',         address:'US-231 at Airport Road',    city:'West Lafayette', units:['E2','M2','L1']},
+  {dept:'Purdue FD',         type:'Automatic Fire Alarm',  address:'Wetherill Laboratory',      city:'Purdue campus',  units:['E11']},
+  {dept:'Tippecanoe County Fire', type:'Carbon Monoxide Alarm', address:'1820 Cumberland Avenue', city:'West Lafayette', units:['E3']},
+  null,        // idle
+  'error',     // error
 ];
 
 function showDemo(i){
   const d = DEMO[((i % DEMO.length) + DEMO.length) % DEMO.length];
-  current = d ? {...d, ts: Date.now()/1000} : null;
-  render(current);
-  const b = document.getElementById('demobadge');
-  b.hidden = false;
-  b.textContent = `DEMO ${((i%DEMO.length)+DEMO.length)%DEMO.length+1}/${DEMO.length} — SPACE to cycle`;
+  if(d === 'error'){ mode='error'; lastError='HTTP 401 from Broadcastify: check bcfy_api_key'; current=null; }
+  else if(d){ mode='call'; current = {...d, ts: Date.now()/1000}; }
+  else { mode='idle'; current=null; }
+  render();
+  modeBtn.hidden = false;
+  modeBtn.textContent = `demo ${((i%DEMO.length)+DEMO.length)%DEMO.length+1}/${DEMO.length}`;
 }
 
+let live = false;
 async function poll(){
   try{
     const r = await fetch('/api/current', {cache:'no-store'});
-    if(!r.ok) throw 0;
-    if(demoMode){ demoMode=false; document.getElementById('demobadge').hidden=true; }
+    if(!r.ok) throw new Error('HTTP '+r.status);
     const j = await r.json();
+    live = true; modeBtn.hidden = true;
     if(j.hold_seconds) FADE_AFTER = j.hold_seconds;
-    current = j.call || null;
-    render(current);
+    if(j.ok === false){ mode='error'; lastError = j.error || 'unknown'; current = null; }
+    else { current = j.call || null; mode = current ? 'call' : 'idle'; }
+    render();
   }catch(e){
-    if(!demoMode){ demoMode = true; showDemo(demoIndex); }
+    if(live){ live=false; mode='error'; lastError='unreachable'; render(); return; }
+    if(mode === 'boot'){ showDemo(demoIndex); }   /* opened as a file: demo */
   }
 }
 poll();
 setInterval(poll, 2000);
 
-/* SPACE cycles demo states so you can design each one. D forces demo mode. */
-addEventListener('keydown', e=>{
-  if(e.code==='Space'){ e.preventDefault(); demoMode=true; showDemo(++demoIndex); }
-  if(e.key==='d'){ demoMode=true; showDemo(demoIndex); }
+/* Keyboard: space cycles the demo states so each one can be designed. */
+addEventListener('keydown', e => {
+  if(e.code === 'Space' && !live){ e.preventDefault(); showDemo(++demoIndex); }
 });
+modeBtn.addEventListener('click', () => showDemo(++demoIndex));
+render();
 </script>
 </body>
 </html>

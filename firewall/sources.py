@@ -19,11 +19,12 @@ MOCK = [
 
 
 def mock(cfg):
-    print("[mock] synthetic dispatch every 45s — no credentials, no audio")
+    print("[mock] synthetic dispatch every 45s. No credentials, no audio.")
     i = 0
     while True:
         dept, text = MOCK[i % len(MOCK)]
         core.publish(dept, text, time.time(), cfg)
+        core.report_ok()
         i += 1
         time.sleep(45)
 
@@ -49,12 +50,13 @@ def trunk(cfg):
             core.publish(cfg["talkgroups"].get(tg, f"TG {tg}"),
                          core.transcribe(wav, cfg["whisper_model"]),
                          meta.get("start_time") or time.time(), cfg)
+            core.report_ok()
         time.sleep(2)
 
 
 # --------------------------------------------------------------- broadcastify
 # The authoritative schema lives at bcfy.io/dev/docs (behind registration).
-# Everything Broadcastify-specific is confined to these two functions — if the
+# Everything Broadcastify-specific is confined to these two functions. If the
 # real field names differ, this is the ONLY place that needs editing.
 def _bcfy_fetch(cfg, since_ts):
     import requests
@@ -71,7 +73,7 @@ def _bcfy_fetch(cfg, since_ts):
 
 
 def _bcfy_normalize(c):
-    """One API record -> (talkgroup:int, start_ts:float, audio_url:str)."""
+    """One API record to (talkgroup:int, start_ts:float, audio_url:str)."""
     tg = c.get("talkgroup") or c.get("tg") or c.get("call_tg")
     if isinstance(tg, str) and "-" in tg:        # "{sid}-{talkgroup}" form
         tg = tg.split("-", 1)[1]
@@ -106,7 +108,9 @@ def broadcastify(cfg):
                                  core.transcribe(tmp, cfg["whisper_model"]), ts, cfg)
                 finally:
                     os.unlink(tmp)
+            core.report_ok()
         except Exception as e:
+            core.report_error(e)
             print(f"[bcfy] error: {e}", file=sys.stderr)
         time.sleep(cfg["poll_seconds"])
 

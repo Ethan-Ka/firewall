@@ -1,4 +1,4 @@
-"""firewall — one command runs the whole thing.
+"""firewall. One command runs the whole thing.
 
     firewall                      # mock calls, opens the display
     firewall --source broadcastify
@@ -35,7 +35,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(json.dumps(payload).encode(), "application/json")
         else:
             # Read from disk every request so you can edit the design and just
-            # hit refresh — no restart, no build step.
+            # hit refresh. No restart, no build step.
             self._send(DISPLAY.read_bytes(), "text/html; charset=utf-8")
 
 

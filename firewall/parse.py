@@ -14,12 +14,12 @@ TYPE_HINTS = [
     (r"structure fire|working fire|building fire",       "Structure Fire"),
     (r"vehicle fire|car fire",                           "Vehicle Fire"),
     (r"(automatic )?fire alarm|alarm sounding",          "Automatic Fire Alarm"),
-    (r"chest pain",                                      "Medical — Chest Pain"),
-    (r"difficulty breathing|shortness of breath",        "Medical — Breathing"),
+    (r"chest pain",                                      "Medical: Chest Pain"),
+    (r"difficulty breathing|shortness of breath",        "Medical: Breathing"),
     (r"cardiac arrest|cpr in progress",                  "Cardiac Arrest"),
-    (r"unconscious|unresponsive",                        "Medical — Unresponsive"),
-    (r"seizure",                                         "Medical — Seizure"),
-    (r"overdose|narcan",                                 "Medical — Overdose"),
+    (r"unconscious|unresponsive",                        "Medical: Unresponsive"),
+    (r"seizure",                                         "Medical: Seizure"),
+    (r"overdose|narcan",                                 "Medical: Overdose"),
     (r"fall(en)?|lift assist",                           "Fall / Lift Assist"),
     (r"personal injury|pi accident|crash|collision|mva", "Vehicle Crash"),
     (r"carbon monoxide|co alarm",                        "Carbon Monoxide Alarm"),
@@ -87,5 +87,5 @@ def parse(text, cfg):
         try:
             return by_llm(text)
         except Exception as e:
-            print(f"  ! llm parser failed ({e}) — using regex", file=sys.stderr)
+            print(f"  ! llm parser failed ({e}), using regex", file=sys.stderr)
     return by_regex(text)
