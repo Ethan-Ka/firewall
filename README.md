@@ -105,21 +105,100 @@ firewall --source broadcastify
 firewall --source trunk
 ```
 
+Or use the runner scripts, which create the venv, install `faster-whisper` on
+first run, and work from any directory:
+
+```
+./scripts/run-broadcastify.sh      # verifies the key first, then polls
+./scripts/run-trunk.sh             # watches the trunk-recorder output dir
+```
+
+`run-broadcastify.sh` refuses to start the poll loop if `--check` fails, so a bad
+key or wrong endpoint cannot quietly burn metered requests. Both pass extra flags
+straight through (`--open`, `--port 8421`).
+
 ### broadcastify
 
-Register at **bcfy.io/dev/apply**, then copy `config.example.json` to `config.json`
-and fill it in. Billing is metered and prepaid: a $5 minimum credit, charged per
-record read, with a spending cap you set. Four talkgroups in one county is very
-little volume.
+Register at **bcfy.io/dev/apply**, then put `BCFY_API_KEY` in `.env` (copy
+`.env.example`), or copy `config.example.json` to `config.json` and fill it in.
+Verify the credential without starting the server:
+
+```
+firewall --check --source broadcastify
+```
+
+That prints which `.env` was loaded, masks the key, makes exactly one request, and
+distinguishes a rejected key (401/403) from a wrong endpoint (404).
+
+Billing is metered and prepaid: a $5 minimum credit, charged per **record read**,
+with a spending cap you set. Measured off the portal usage page on 2026-08-19 —
+1,032 records for $0.62 — the rate is **about $0.0006 per record**, so $5 is
+roughly 8,300 records.
+
+The unit that costs money is records per fetch, not fetches per hour. A poll that
+returns no new calls reads zero records and is free, so lowering
+`FIREWALL_POLL_SECONDS` saves nothing:
+
+| | Records | Cost |
+|---|---|---|
+| One `init=1` fetch | 25 | $0.015 |
+| One poll, no new calls | 0 | free |
+| Steady state, whole system (~16 records/hour) | 16/hr | ~$0.01/hour |
+| Stuck re-sending `init=1` every 5s | 18,000/hr | **$10.80/hour** |
+
+That last row is the one to design against: `init=1` returns the last 25 calls
+regardless of age, so anything that keeps the `pos` cursor from advancing turns a
+$7/month display into a drained credit in under half an hour. Four talkgroups in
+one county is otherwise very little volume.
 
 Broadcastify Premium ($15 for six months, $30 for a year) is separate and buys 365
 days of both live-audio and Calls archives. That is the underrated part. Pull a
 month of historical Tippecanoe fire dispatches and tune the parser against real
 phrasing offline, instead of waiting around for something to catch fire.
 
-> **Unverified.** The authoritative API schema lives at **bcfy.io/dev/docs**, behind
-> registration. The endpoint path and response field names in this repo were
-> inferred from the public documentation summary. Check them before trusting them.
+**Verified against the live docs, 2026-08-19.** The earlier guess in this repo was
+wrong in two ways, both now fixed:
+
+- **URL layout.** Endpoints are `/{endpoint}/v1`, not `/v1/{endpoint}`. Live Calls
+  is `GET https://api.bcfy.io/calls/v1/live/`. The old guess returned a hard 404.
+- **Auth.** The raw API key is *not* a bearer token. It is the HMAC-SHA256 signing
+  secret for a short-lived JWT whose header carries the **API Key ID** (`kid`) and
+  whose payload carries the **Application ID** (`iss`). Minting lives in
+  `bcfy_auth.py`, implemented with stdlib `hmac` only, and is unit-tested against
+  the sample JWT published in the docs.
+
+Live Calls also needs an **authenticated Broadcastify user** embedded in the JWT
+(`sub`/`utk`), obtained by posting your username and password to
+`/common/v1/auth`; the exception is public playlists. A free account suffices.
+
+Query params are mutually exclusive: `playlist_uuid`, `sid`, `nodeId`, or `groups`.
+
+**`groups` takes exactly one group, not the documented five.** The docs say
+"comma delimited ... (Max 5)". Measured against sid 9099 on 2026-08-19, with
+`init` dropped and a 6-hour `pos` window:
+
+```
+groups=9099-2021,9099-2105   ->  0 records
+groups=9099-2021             ->  6 records
+groups=9099-2105             -> 10 records
+```
+
+Empty set, no error, a plausible-looking `lastPos`. Encoded comma, pipe,
+semicolon and a repeated `groups=` all fail the same way. So `broadcastify()`
+**round-robins one group per tick**, each with its own `pos` cursor. The 5-second
+floor applies to the endpoint rather than to each group, so two talkgroups means
+each is polled every 10 seconds — well inside Broadcastify's own 10-30s ingest
+lag, and it keeps every record you pay for one you actually wanted.
+
+`init=1` is never sent. It reads 25 records regardless of age, and the loop drops
+anything older than `hold_seconds` anyway. Each response's `lastPos` feeds the
+next `pos`; on an empty result it comes back `0`, so the cursor holds its previous
+value rather than resetting to the server's rolling 5-minute default.
+
+> Per-call response field names are not listed on the docs pages that were
+> captured, so `_bcfy_normalize()` accepts several spellings for the audio URL.
+> `firewall --check --source broadcastify` dumps one raw record so it can be
+> pinned down against a real response.
 > Everything Broadcastify-specific is confined to `_bcfy_fetch()` and
 > `_bcfy_normalize()` in `sources.py`, and that is the only place that should need
 > editing.
@@ -128,6 +207,92 @@ The open question is latency. Broadcastify adds ingest and upload lag on top of
 dispatch. Given the 30 to 90 second head start, it may still beat the truck to your
 door, but it is close enough to be worth measuring before spending money on radio
 hardware.
+
+### eta and proximity
+
+The display answers two questions about a dispatch: when the apparatus reaches
+the scene, and — the one you actually care about — whether its route passes close
+enough that you will hear the siren, and when. Set `FIREWALL_HOME` in `.env` to
+`"lat,lon"` or a street address; leave it blank and you get the scene ETA only.
+
+#### how to write the address
+
+`FIREWALL_HOME` accepts any of these, all verified against the live geocoders:
+
+| Value | Notes |
+|---|---|
+| `531 W Navajo St, West Lafayette, IN 47906` | full address; the ZIP is optional |
+| `531 W Navajo St, West Lafayette, IN` | city and state |
+| `531 W Navajo St` | street alone — West Lafayette, IN is assumed |
+| `Cary Quadrangle` | a landmark or building name |
+| `40.451520,-86.915309` | exact coords, no lookup at all |
+
+Don't quote it, and leave off any apartment or unit number — neither geocoder
+handles a unit and both do better without one. Abbreviations don't matter:
+`St` / `Street` / `St.` and `W` / `West` all resolve identically.
+
+Anything containing a comma is split into street, city and state, so naming a
+city means the lookup happens **there**. Get the city wrong and you get nothing
+back rather than a wrong answer — `500 W Navajo St, Lafayette, IN` returns no
+match, because that street is in West Lafayette. This matters more here than in
+most places: Lafayette and West Lafayette are different cities four miles and one
+river apart, and they share street names.
+
+The resolved coordinates are printed at startup and by `firewall --check`, so
+check them against a map once:
+
+```
+home      40.451520, -86.915309  (531 W Navajo St, ...)  siren radius 600m
+```
+
+They're cached in `.geocache.json` (git-ignored); delete it to force a re-lookup.
+
+#### stations
+
+`firewall/geo.py` holds the station coordinates, taken from OpenStreetMap's named
+building POIs and confirmed against westlafayette.in.gov and purdue.edu:
+
+| Station | Address | Coords |
+|---|---|---|
+| WLFD 1 | 300 North St | 40.426102, -86.908674 |
+| WLFD 2 | 531 W. Navajo St | 40.451520, -86.915309 |
+| WLFD 3 | 1100 W. Kalberer Rd | 40.468799, -86.920082 |
+| Purdue FD | 1250 3rd St | 40.427700, -86.924003 |
+
+Which station rolls is inferred rather than routed for: Purdue has one house, so
+its talkgroup settles it, and WLFD numbers apparatus by station, so `E2` means
+Station 2. Those unit ids already come out of `parse.py`, which makes them a
+better signal than any router could offer.
+
+"Passes you" is a corridor test — the closest approach of the straight
+station-to-incident path to your home, clamped to the segment so a call in the
+opposite direction cannot claim to pass you — against `FIREWALL_SIREN_METRES`
+(default 600m, which covers the surrounding streets and not just your own).
+
+**Accuracy is about ± a minute, and no method does better.** The dominant term is
+turnout — dispatch tones to wheels rolling — which runs 60–90 seconds and varies
+call to call; NFPA 1710 sets an 80-second target. Lights, traffic, and which units
+actually roll add more. Real road routing would tighten the travel leg and leave
+turnout untouched, so it buys far less than it looks like it should. Tune
+`TURNOUT_SECONDS` in `geo.py` against runs you watch. If you later want street
+distances, a self-hosted OSRM is a drop-in for `travel_seconds()`.
+
+Incident addresses are geocoded free — no key, no bill — via Nominatim with the
+US Census geocoder as fallback, cached forever in `.geocache.json`.
+
+Both results are validated, and that is not defensive padding. Two separate traps
+sit on this exact county:
+
+- **Census relabels cities and cannot be trusted to report one.** Ask it for
+  `500 W Navajo St, Lafayette, IN` and it answers `500 W NAVAJO ST, LAFAYETTE,
+  IN, 47906` — while handing back West Lafayette's coordinates and West
+  Lafayette's ZIP. It normalises to the USPS postal city and echoes whatever you
+  asked for, so no name check can catch it. Its results are instead verified by
+  reverse-geocoding the returned point against OSM.
+- **`Lafayette` is a substring of `West Lafayette`.** A city guard written with
+  `in` rather than equality passes a Lafayette address straight through — the
+  precise confusion the guard exists to prevent. `_same_city()` compares
+  normalised strings for equality for this reason.
 
 ### trunk
 
@@ -195,7 +360,15 @@ Override `talkgroups` in `config.json` for anywhere else.
 
 ## Configuration
 
-Copy `config.example.json` to `config.json`. It is git-ignored.
+Copy `config.example.json` to `config.json`, or `.env.example` to `.env`. Both are
+git-ignored. Precedence, lowest to highest:
+
+```
+DEFAULTS in config.py  <  config.json  <  .env  <  real environment
+```
+
+`.env.example` documents every variable. The loader is thirty lines of standard
+library in `config.py`, so mock mode still has no dependencies.
 
 | Key | Default | What it does |
 |---|---|---|
@@ -241,11 +414,47 @@ Ladder 1, respond to 340 Sagamore Parkway West for a structure fire." It pulls
 sentence, and it returns nothing for radio chatter that is not a dispatch, so
 status checks never reach the screen.
 
-Extend `TYPE_HINTS` in `parse.py` as you hear how your dispatchers actually talk.
+**Street addresses and campus buildings are handled separately.** `ADDR_RE`
+requires a house number and a street suffix, which is right for West Lafayette FD
+and useless for Purdue FD — campus dispatches name a building, not a street, so
+almost none of them carry an address at all. Rather than keeping a list of every
+building on campus, `LANDMARK_RE` captures whatever sits between the dispatcher's
+"respond to" and the reason clause that follows, and `_NOT_A_PLACE` throws out the
+captures that ran into the call type instead of a place name. Street match wins
+when both are present, since a landmark capture would happily swallow an address.
 
-For garbled transcripts, set `"use_llm_parser": true` and export
-`ANTHROPIC_API_KEY` (about $0.0002 per call, `pip install -e ".[llm]"`). It falls
-back to regex automatically if the call fails.
+Shorthand is resolved by `LANDMARK_ALIASES` in `geo.py` — `PMU`, `the Union`,
+`Cary Quad`, `CoRec`, `Ross-Ade`, `Mackey`, `Wetherill`. Two entries exist because
+OSM has no matching name at all (`Purdue Memorial Union` and `Krannert` map to
+their street addresses); the rest are dispatch abbreviations. Extend both this and
+`TYPE_HINTS` as you hear how your dispatchers actually talk.
+
+Geocoding campus buildings needs a second pass: Nominatim's structured query is
+the only form that reliably honours the city, but it indexes streets rather than
+points of interest, so `Ross-Ade Stadium` and `Wetherill Laboratory of Chemistry`
+miss it entirely. `_nominatim()` therefore tries structured first and free-text
+second.
+
+Current coverage across the standard phrasings, all the way through to an ETA:
+
+```
+340 Sagamore Parkway West   Structure Fire          scene ~134s
+1820 Cumberland Avenue      Vehicle Crash           scene ~186s
+500 W Navajo Street         Automatic Fire Alarm    scene ~325s
+415 North River Road        Carbon Monoxide Alarm   scene ~480s
+Cary Quadrangle             Medical: Chest Pain     scene ~137s
+CoRec                       Water Rescue            scene  ~92s
+Ross-Ade Stadium            Fall / Lift Assist      scene ~155s
+Wetherill                   Automatic Fire Alarm    scene ~158s
+PMU                         Medical: Unresponsive   scene ~181s
+Hillenbrand Hall            Elevator Rescue         scene ~101s  PASSES YOU
+```
+
+That is on clean text. **Real whisper output off a radio is not clean**, and the
+regex is brittle in exactly the way regexes are. For garbled transcripts set
+`FIREWALL_USE_LLM_PARSER=true` and fill in `ANTHROPIC_API_KEY` (about $0.0002 per
+call, `pip install -e ".[llm]"`). It falls back to regex automatically if the call
+fails, so turning it on costs nothing but the key.
 
 ---
 

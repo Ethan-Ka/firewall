@@ -31,11 +31,44 @@ TYPE_HINTS = [
 ]
 
 STREET = (r"(?:street|st|avenue|ave|road|rd|drive|dr|lane|ln|boulevard|blvd|court|ct|"
-          r"way|place|pl|circle|cir|parkway|pkwy|highway|hwy|terrace|trail)")
+          r"way|place|pl|circle|cir|parkway|pkwy|highway|hwy|terrace|trail|mall|"
+          r"plaza|square|sq)")
 ADDR_RE = re.compile(
     rf"\b(\d{{1,5}}\s+(?:(?:north|south|east|west|[NSEW])\.?\s+)?"
     rf"(?:[A-Z][\w'-]*\s+){{0,4}}{STREET}\b\.?"
     rf"(?:\s+(?:north|south|east|west))?)", re.I)
+
+
+# Campus dispatches name a building, not a street: "respond to Cary Quadrangle",
+# "respond to Wetherill Laboratory". ADDR_RE requires a house number and a street
+# suffix, so it returns nothing for those -- which matters because Purdue FD is
+# one of the two talkgroups this watches and almost none of its calls carry a
+# street address.
+#
+# Rather than keep a list of every building on campus, this captures whatever
+# sits between the dispatcher's "respond to" and the reason clause that follows.
+# Dispatch phrasing is formulaic enough for that to hold, and the geocoder
+# already resolves campus building names on its own.
+LANDMARK_RE = re.compile(
+    r"\b(?:respond(?:ing)?\s+to|en\s?route\s+to|responding)\s+"
+    r"(?:the\s+)?"
+    r"(?P<loc>[A-Z0-9][\w'\-]*(?:\s+(?!for\b|on\s+the\b)[A-Z0-9][\w'\-]*){0,4})"
+    r"(?=\s*(?:,|\.|$|\bfor\b|\bon\s+the\b))", re.I)
+
+# Words that mean the capture ran into the call type instead of a place name.
+_NOT_A_PLACE = re.compile(
+    r"^(a|an|the|assist|standby|stand\s?by|report(ed)?|possible|unknown)$", re.I)
+
+
+def _landmark(text):
+    """Building or landmark name from a dispatch with no street address."""
+    m = LANDMARK_RE.search(text)
+    if not m:
+        return None
+    loc = " ".join(m.group("loc").split()).strip(" ,.")
+    if not loc or _NOT_A_PLACE.match(loc):
+        return None
+    return loc
 
 
 def _unit(raw):
@@ -53,10 +86,13 @@ def by_regex(text):
             seen.add(u)
             units.append(u)
     addr = ADDR_RE.search(text)
+    # Street address first -- it is the more specific match, and a landmark
+    # capture would happily swallow one.
+    where = addr.group(1).title() if addr else _landmark(text)
     return {
         "units": units[:6],
         "type": next((lab for pat, lab in TYPE_HINTS if re.search(pat, text, re.I)), None),
-        "address": addr.group(1).title() if addr else None,
+        "address": where,
         "city": None,
     }
 

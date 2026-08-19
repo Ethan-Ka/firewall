@@ -8,3 +8,8 @@ recordings/
 *.wav
 *.m4a
 .DS_Store
+.env
+.env.bak*
+firewall.egg-info/
+*.egg-info/
+.geocache.json

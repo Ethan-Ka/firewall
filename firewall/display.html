@@ -111,6 +111,16 @@ h1{
 .attrib{margin-top:var(--sp-8);font-size:var(--text-base);color:var(--text-muted)}
 .attrib .cat{color:var(--tone);font-weight:500}
 
+/* ETA sits directly under the attribution, close enough to read as part of
+   the same "who and when" group. Tone colour is reserved for the case that
+   actually concerns you -- a run passing your door -- so the eye can skip the
+   scene-only ETA at a glance. */
+.eta{margin-top:var(--sp-2);font-family:var(--font-mono);
+     font-size:var(--text-base);color:var(--text-muted)}
+.eta.near{color:var(--tone);font-weight:500}
+.eta .sub{color:var(--text-muted);font-weight:400}
+.eta .approx{opacity:.65}
+
 .units{margin-top:var(--sp-4);display:flex;flex-wrap:wrap;gap:var(--sp-2);
        padding:0;list-style:none}
 .units li{
@@ -204,6 +214,27 @@ let current = null, painted = null, mode = 'boot', demoIndex = 0, lastError = nu
 
 const esc = t => String(t??'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
 const ago = a => a<60 ? `${a|0}s ago` : `${(a/60)|0}m ago`;
+const mmss = s => s<60 ? `${s|0}s` : `${(s/60)|0}:${String((s%60)|0).padStart(2,'0')}`;
+
+/* The ETA is an estimate dominated by turnout time, so it is rendered as a
+   countdown but never as a precise one: "~1:20", and it degrades to "now"
+   rather than counting into negative numbers it cannot possibly know. */
+function etaText(eta){
+  if(!eta) return '';
+  const now = Date.now()/1000;
+  if(eta.passes_you && eta.pass_at != null){
+    const t = eta.pass_at - now;
+    const sub = eta.closest_metres!=null ? ` · ${eta.closest_metres} m away` : '';
+    return t > 0 ? `<span class="approx">passes you in ~</span>${mmss(t)}${
+                     `<span class="sub">${sub}</span>`}`
+                 : `passing you now<span class="sub">${sub}</span>`;
+  }
+  if(eta.scene_at == null) return '';
+  const t = eta.scene_at - now;
+  const from = eta.station ? ` · ${eta.station}` : '';
+  return t > 0 ? `<span class="approx">on scene in ~</span>${mmss(t)}<span class="sub">${from}</span>`
+               : `<span class="approx">on scene</span><span class="sub">${from}</span>`;
+}
 const catOf = t => CATEGORIES.find(c=>c.match.test(t||'')) || CATEGORIES.at(-1);
 
 /* ---------- painters: these rebuild the DOM, so they run only on change ---- */
@@ -223,6 +254,7 @@ function paintCall(call){
       ${call.address?`<p class="address">${esc(call.address)}${
         call.city?`<span class="city">${esc(call.city)}</span>`:''}</p>`:''}
       <p class="attrib">${esc(call.dept||'Dispatch')} <span class="cat">${c.label}</span></p>
+      ${call.eta?`<p class="eta${call.eta.passes_you?' near':''}" id="feta"></p>`:''}
       ${units?`<ul class="units">${units}</ul>`:''}
     </div>
     ${metaRow('<span id="fclock"></span>')}`;
@@ -271,6 +303,8 @@ function tick(){
   const left = document.getElementById('fleft');
   if(!left) return;
   if(mode === 'call' && current){
+    const eta = document.getElementById('feta');
+    if(eta) eta.innerHTML = etaText(current.eta);
     const age = Math.max(0, Date.now()/1000 - current.ts);
     bar.style.width = (100 - Math.min(100, age/FADE_AFTER*100)) + '%';
     el.classList.toggle('stale', age > FADE_AFTER);
