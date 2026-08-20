@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>firewall · review</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* ===========================================================================
+   Review layer. Same vendored tokens as display.html -- this is the same
+   product, seen from the workbench rather than the hallway.
+
+   The whole job is: hear a clip, type what was said, move on. Everything here
+   serves that loop, which is why the textarea has focus at all times and every
+   action has a key: you should never need the mouse to label a hundred clips.
+   =========================================================================== */
+:root{
+  --n-0:#FFFFFF; --n-100:#EFEDE8; --n-300:#C4C0B5; --n-700:#413E38;
+  --n-800:#2A2825; --n-900:#1A1917;
+  --clay-300:#E8A791; --pine-300:#7ECBBF;
+  --surface:var(--n-900); --raised:var(--n-800); --border:var(--n-700);
+  --text:var(--n-0); --text-body:var(--n-100); --text-muted:var(--n-300);
+  --font-sans:'IBM Plex Sans','Public Sans',system-ui,sans-serif;
+  --font-mono:'IBM Plex Mono',ui-monospace,monospace;
+  --text-sm:0.9375rem; --text-base:1.0625rem; --text-xl:1.5rem;
+  --sp-1:.25rem; --sp-2:.5rem; --sp-3:.75rem; --sp-4:1rem; --sp-6:1.5rem;
+  --sp-8:2rem;
+  --r-md:4px; --dur-fast:140ms; --ease:cubic-bezier(.2,0,0,1);
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0; background:var(--surface); color:var(--text-body);
+  font-family:var(--font-sans); font-size:var(--text-base);
+  display:grid; grid-template-rows:auto 1fr;
+}
+header{
+  display:flex; align-items:baseline; gap:var(--sp-6);
+  padding:var(--sp-4) var(--sp-6); border-bottom:1px solid var(--border);
+}
+h1{font-size:var(--text-base); font-weight:600; color:var(--text); margin:0;
+   letter-spacing:-0.02em}
+.stats{font-family:var(--font-mono); font-size:var(--text-sm);
+       color:var(--text-muted); margin-left:auto}
+.stats b{color:var(--pine-300); font-weight:500}
+main{display:grid; grid-template-columns:minmax(260px,340px) 1fr; min-height:0}
+/* ---------------------------------------------------------------- clip list */
+#list{border-right:1px solid var(--border); overflow-y:auto; min-height:0}
+.clip{
+  display:block; width:100%; text-align:left; background:none; color:inherit;
+  border:0; border-bottom:1px solid var(--border); cursor:pointer;
+  padding:var(--sp-3) var(--sp-4); font:inherit;
+  transition:background var(--dur-fast) var(--ease);
+}
+.clip:hover{background:var(--raised)}
+.clip[aria-current="true"]{background:var(--raised); box-shadow:inset 3px 0 0 var(--pine-300)}
+.clip .when{font-family:var(--font-mono); font-size:0.8125rem; color:var(--text-muted)}
+.clip .snip{
+  display:block; margin-top:2px; font-size:var(--text-sm); color:var(--text-body);
+  overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.clip[data-done="1"] .when::after{content:" ✓"; color:var(--pine-300)}
+.clip[data-dispatch="1"] .when::before{content:"▸ "; color:var(--clay-300)}
+/* Arrived while you were labelling. Said quietly, in the row itself, because
+   a clip landing mid-sentence is news but it is not an interruption. */
+.clip[data-new="1"] .when::after{content:" new"; color:var(--clay-300)}
+.clip[data-new="1"][data-done="1"] .when::after{content:" ✓"; color:var(--pine-300)}
+/* ------------------------------------------------------------------- editor */
+#pane{padding:var(--sp-6); overflow-y:auto; min-height:0;
+      display:flex; flex-direction:column; gap:var(--sp-4)}
+.meta{font-family:var(--font-mono); font-size:0.8125rem; color:var(--text-muted)}
+.player{display:flex; align-items:center; gap:var(--sp-3); flex-wrap:wrap}
+audio{width:100%; max-width:520px; filter:invert(.92) hue-rotate(180deg)}
+button.act{
+  font:inherit; font-size:var(--text-sm); color:var(--text-body);
+  background:var(--raised); border:1px solid var(--border);
+  border-radius:var(--r-md); padding:var(--sp-2) var(--sp-3); cursor:pointer;
+  transition:border-color var(--dur-fast) var(--ease);
+}
+button.act:hover{border-color:var(--text-muted)}
+button.act[aria-pressed="true"]{border-color:var(--pine-300); color:var(--pine-300)}
+button.act.primary{background:var(--pine-300); color:var(--n-900); border-color:var(--pine-300);
+                   font-weight:600}
+label.lbl{display:block; font-size:0.8125rem; color:var(--text-muted);
+          text-transform:uppercase; letter-spacing:.06em; margin-bottom:var(--sp-2)}
+.machine{
+  font-family:var(--font-mono); font-size:var(--text-sm); color:var(--text-muted);
+  background:var(--raised); border:1px solid var(--border);
+  border-radius:var(--r-md); padding:var(--sp-3); white-space:pre-wrap;
+  min-height:2.5rem;
+}
+.machine .bad{color:var(--clay-300)}
+/* One Broadcastify record is one channel grant, and a grant holds every keyup
+   inside its hang time -- 1787205431 is Medic 16's "that is a negative."
+   answered by the dispatcher's "Clear, thank you." in a single mp3 (see
+   segments.py). Those are two transmissions and they are drawn as two, each
+   playable on its own range of the one file. The box underneath stays ONE box:
+   a truth is keyed on the recording, and that is what --score transcribes. */
+.keyups{list-style:none; margin:0; padding:0;
+        display:flex; flex-direction:column; gap:var(--sp-2)}
+.keyups li{display:flex; gap:var(--sp-3); align-items:baseline}
+.keyups .ku{flex:none; font-family:var(--font-mono); font-size:0.8125rem;
+            white-space:nowrap}
+.keyups .ku-text{font-family:var(--font-mono); font-size:var(--text-sm);
+                 color:var(--text-muted); white-space:pre-wrap}
+.keyups .bad{color:var(--clay-300)}
+.note{margin:0 0 var(--sp-2); font-size:0.8125rem; color:var(--clay-300)}
+.clip .ku-n{font-family:var(--font-mono); font-size:0.75rem; color:var(--clay-300)}
+textarea{
+  width:100%; min-height:7rem; resize:vertical; font-family:var(--font-mono);
+  font-size:var(--text-base); line-height:1.45; color:var(--text);
+  background:var(--n-900); border:1px solid var(--border);
+  border-radius:var(--r-md); padding:var(--sp-3);
+}
+textarea:focus-visible, button:focus-visible, .clip:focus-visible{
+  outline:2px solid var(--pine-300); outline-offset:2px;
+}
+.row{display:flex; gap:var(--sp-3); align-items:center; flex-wrap:wrap}
+kbd{
+  font-family:var(--font-mono); font-size:0.75rem; color:var(--text-muted);
+  border:1px solid var(--border); border-bottom-width:2px; border-radius:3px;
+  padding:1px 5px; background:var(--raised);
+}
+.hint{font-size:0.8125rem; color:var(--text-muted)}
+.empty{color:var(--text-muted); padding:var(--sp-8); text-align:center}
+@media (max-width:820px){ main{grid-template-columns:1fr; grid-template-rows:200px 1fr} }
+</style>
+</head>
+<body>
+<header>
+  <h1>firewall · review</h1>
+  <span class="hint">type what was <em>said</em>, not what it should have been</span>
+  <span class="stats" id="stats"></span>
+</header>
+<main>
+  <div id="list"></div>
+  <div id="pane"><p class="empty">loading…</p></div>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+
+/* The clip list, newest first, exactly as catalogue() sorted it. Nothing below
+   addresses a clip by its position in that list: calls arrive at the top while
+   you are working, and every index under them shifts by one, which used to
+   move the selection onto a different clip in the middle of a sentence. A
+   clip's path is its identity and paths do not move. */
+let clips = [], atPath = null, summary = {clips: 0, labelled: 0, wer: null};
+let fresh = new Set();      /* paths that showed up after this page loaded */
+let loaded = false, listSig = '';
+
+const fmt = ts => ts ? new Date(ts * 1000).toLocaleString([], {
+  month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit',
+  second:'2-digit'}) : 'unknown time';
+
+/* Set by select(), which is the only thing that knows which <audio> element
+   and which keyups are on screen right now. */
+let playKeyup = () => {}, playWhole = () => {};
+
+const indexOf = p => clips.findIndex(c => c.path === p);
+const at = () => clips[indexOf(atPath)] || null;
+const firstUnlabelled = () =>
+  (clips.find(c => c.truth === null) || clips[0]).path;
+
+/* /api/clips is a scan of two local directories, so asking for it every few
+   seconds costs a few milliseconds of disk and nothing else. It has to be
+   asked repeatedly at all because the point of this page is to keep labelling
+   while the radio is still running: fetching once at load meant every call
+   recorded after you opened it stayed invisible until you reloaded, which is
+   exactly when you were least willing to. */
+const POLL_MS = 4000;
+
+async function poll() {
+  try {
+    apply(await fetch('/api/clips').then(r => r.json()));
+  } catch (e) {
+    /* A restarting server, or a fetch lost to sleep, is not worth a dead page.
+       The next tick picks it up. */
+  }
+}
+
+/* Fold a fresh payload in without touching what the user is doing: the editor
+   pane, and so the text half-typed in it, is left alone unless the clip it is
+   showing has actually gone. */
+function apply(data) {
+  const known = new Set(clips.map(c => c.path));
+  clips = data.clips;
+  summary = data.summary;
+  if (loaded) for (const c of clips) if (!known.has(c.path)) fresh.add(c.path);
+  loaded = true;
+  renderStats();
+  renderList();
+  if (!clips.length) {
+    atPath = null;
+    $('#pane').innerHTML = '<p class="empty">No saved audio yet. Set '
+      + 'FIREWALL_AUDIO_DIR or FIREWALL_INCIDENT_DIR and let it run.</p>';
+  } else if (indexOf(atPath) < 0) {
+    select(firstUnlabelled());   /* first payload, or the clip left the disk */
+  }
+}
+
+function renderStats() {
+  $('#stats').innerHTML = `<b>${summary.labelled}</b>/${summary.clips} labelled`
+    + (summary.wer === null ? '' : ` · WER <b>${Math.round(summary.wer * 100)}%</b>`)
+    + (fresh.size ? ` · <b>${fresh.size}</b> new` : '');
+}
+
+function renderList() {
+  /* Rebuild only when the list really changed, so a poll every few seconds
+     does not throw the rows away under a hovering cursor for no reason. */
+  const sig = clips.map(c => `${c.path}\u0000${c.truth ?? c.machine ?? ''}`)
+                   .join('\u0001');
+  if (sig === listSig) return;
+  listSig = sig;
+  const list = $('#list');
+  /* Where the selected row currently sits on screen. New clips are inserted
+     above it, so restoring the raw scroll position would slide the clip you
+     are labelling out from under you; pinning that one row holds it still. */
+  const anchor = list.querySelector('.clip[aria-current="true"]');
+  const offset = anchor ? anchor.offsetTop - list.scrollTop : null;
+  list.innerHTML = '';
+  clips.forEach(c => {
+    const b = document.createElement('button');
+    b.className = 'clip'; b.type = 'button';
+    b.dataset.path = c.path;
+    b.dataset.done = c.truth === null ? '0' : '1';
+    b.dataset.dispatch = c.dispatch ? '1' : '0';
+    b.dataset.new = fresh.has(c.path) ? '1' : '0';
+    b.setAttribute('aria-current', c.path === atPath);
+    b.innerHTML = `<span class="when">${fmt(c.ts)}</span>`
+      + (c.spans && c.spans.length > 1
+          ? ` <span class="ku-n">${c.spans.length} keyups</span>` : '')
+      + `<span class="snip">${esc(c.truth ?? c.machine ?? '—')}</span>`;
+    b.onclick = () => select(c.path);
+    list.appendChild(b);
+  });
+  const moved = list.querySelector('.clip[aria-current="true"]');
+  if (moved && offset !== null) list.scrollTop = moved.offsetTop - offset;
+}
+
+function markCurrent(scroll) {
+  document.querySelectorAll('.clip').forEach(b =>
+    b.setAttribute('aria-current', b.dataset.path === atPath));
+  if (scroll) document.querySelector('.clip[aria-current="true"]')
+    ?.scrollIntoView({block:'nearest'});
+}
+
+const esc = s => String(s ?? '').replace(/[<>&]/g,
+  m => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[m]));
+
+// Words the machine got that the truth does not contain are the interesting
+// ones -- they are what the vocabulary and model changes have to fix.
+function markup(machine, truth) {
+  if (!machine) return '<em>not transcribed yet</em>';
+  if (truth === null) return esc(machine);
+  const have = new Set(truth.toLowerCase().match(/[a-z0-9]+/g) || []);
+  return machine.split(/(\s+)/).map(w => {
+    const k = w.toLowerCase().replace(/[^a-z0-9]/g, '');
+    return k && !have.has(k) ? `<span class="bad">${esc(w)}</span>` : esc(w);
+  }).join('');
+}
+
+/* What the machine heard, drawn as however many transmissions it really was.
+   A clip with `spans` is a channel grant that held an exchange: showing it as
+   one paragraph is how the second voice used to disappear. Each keyup gets its
+   own range and its own play button; the wrong-word markup is still scored
+   against the one truth for the whole recording, because that is what the
+   corpus holds. */
+function heard(c) {
+  const ks = keyupsOf(c);
+  /* Re-transcribing asks the current settings about the whole recording, and
+     the server answers with one string -- the keyup texts below are what the
+     incident log recorded at the time, so the new answer is shown as its own
+     block rather than smeared back over ranges it was never split into. */
+  const again = c.retried
+    ? `<div class="machine">${markup(c.machine, c.truth)}</div>` : '';
+  if (!ks.length)
+    return again || `<div class="machine">${markup(c.machine, c.truth)}</div>`;
+  return again + '<ol class="keyups">' + ks.map((s, i) =>
+    `<li><button class="act ku" data-keyup="${i}">▶ ${s.start.toFixed(2)}–`
+    + `${s.end.toFixed(2)}s</button><span class="ku-text">`
+    + (s.text ? markup(s.text, c.truth) : '<em>no speech in this one</em>')
+    + '</span></li>').join('') + '</ol>';
+}
+
+/* Only a clip that holds more than one keyup is drawn as several: one keyup is
+   the whole recording, and a range on it would say nothing. */
+const keyupsOf = c => (c.spans && c.spans.length > 1) ? c.spans : [];
+
+/* Move by one row in the list you can see, in whichever direction. */
+function step(d) {
+  const i = indexOf(atPath);
+  if (i < 0) return;
+  select(clips[Math.min(clips.length - 1, Math.max(0, i + d))].path);
+}
+
+function select(path) {
+  const i = indexOf(path);
+  if (i < 0) return;          /* an unknown path leaves the selection alone */
+  const c = clips[i];
+  const keyups = keyupsOf(c);
+  atPath = c.path;
+  if (fresh.delete(atPath)) { renderStats(); renderList(); }
+  markCurrent(true);
+  $('#pane').innerHTML = `
+    <div class="meta">${fmt(c.ts)} · ${esc(c.dept ?? 'unknown')}
+      ${c.type ? '· ' + esc(c.type) : ''} ${c.incident ? '· ' + esc(c.incident) : ''}
+      <br>${esc(c.path)}</div>
+    <div class="player">
+      <audio id="audio" src="/api/audio?path=${encodeURIComponent(c.path)}"
+             controls preload="auto"></audio>
+      <button class="act" id="slow" aria-pressed="false">0.75×</button>
+      <button class="act" id="loop" aria-pressed="false">loop</button>
+      <button class="act" id="guess">re-transcribe</button>
+    </div>
+    <div>
+      <label class="lbl">what the machine heard${
+        keyups.length ? ` · ${keyups.length} keyups in this one recording` : ''}</label>
+      <div id="machine">${heard(c)}</div>
+    </div>
+    <div>
+      <label class="lbl" for="truth">what was actually said</label>
+      ${keyups.length ? `<p class="note">This file is one recording holding
+        ${keyups.length} transmissions. Type <b>all of them</b>, in order, in
+        this one box &mdash; the truth is stored against the recording, not
+        against a keyup.</p>` : ''}
+      <textarea id="truth" spellcheck="false"
+        placeholder="${keyups.length ? 'type every keyup, in order'
+                                     : 'type it, or leave blank for no speech'}">${esc(c.truth ?? '')}</textarea>
+    </div>
+    <div class="row">
+      <button class="act primary" id="save">save &amp; next</button>
+      <button class="act" id="nospeech">no speech</button>
+      <button class="act" id="skip">skip</button>
+      <span class="hint"><kbd>enter</kbd> save · <kbd>shift enter</kbd> newline ·
+        <kbd>esc</kbd> then <kbd>space</kbd> replay · <kbd>esc</kbd> then
+        <kbd>j</kbd>/<kbd>k</kbd> move · <kbd>esc</kbd> then <kbd>n</kbd> no speech${
+        keyups.length ? ' · <kbd>esc</kbd> then <kbd>1</kbd>…<kbd>'
+                        + keyups.length + '</kbd> one keyup' : ''}</span>
+    </div>`;
+  const audio = $('#audio');
+  audio.play().catch(() => {});          /* autoplay may need a click first */
+  /* Playing one keyup means seeking the element that is already loaded, not
+     re-pointing src at ".mp3#t=a,b". A media fragment is read when the source
+     loads, so clicking a second keyup of the same clip would change the URL
+     hash and nothing else -- and even when it does reload, it re-fetches bytes
+     the browser already has. Seeking is instant and always right.
+     `stopAt` is cleared by any seek we did not make, so dragging the scrubber
+     hands the clip back to you rather than cutting it off at some old range. */
+  let stopAt = null, seeking = false;
+  audio.addEventListener('timeupdate', () => {
+    if (stopAt !== null && audio.currentTime >= stopAt) {
+      audio.pause(); stopAt = null;
+    }
+  });
+  audio.addEventListener('seeked', () => {
+    if (seeking) seeking = false; else stopAt = null;
+  });
+  playKeyup = n => {
+    const s = keyups[n];
+    if (!s) return;
+    seeking = true; stopAt = s.play_end; audio.currentTime = s.play_start;
+    audio.play().catch(() => {});
+  };
+  playWhole = () => { stopAt = null; seeking = true; audio.currentTime = 0;
+                      audio.play().catch(() => {}); };
+  const wireKeyups = () => $('#machine').querySelectorAll('.ku').forEach(b =>
+    b.onclick = () => playKeyup(Number(b.dataset.keyup)));
+  wireKeyups();
+  $('#slow').onclick = e => {
+    const on = e.target.getAttribute('aria-pressed') === 'true';
+    e.target.setAttribute('aria-pressed', !on);
+    audio.playbackRate = on ? 1 : 0.75;
+  };
+  $('#loop').onclick = e => {
+    const on = e.target.getAttribute('aria-pressed') === 'true';
+    e.target.setAttribute('aria-pressed', !on); audio.loop = !on;
+  };
+  $('#guess').onclick = async e => {
+    e.target.textContent = 'transcribing…';
+    const r = await fetch('/api/transcribe', {method:'POST',
+      body: JSON.stringify({path: c.path})}).then(r => r.json());
+    c.machine = r.text; c.retried = true;
+    $('#machine').innerHTML = heard(c);
+    wireKeyups();
+    e.target.textContent = 're-transcribe';
+  };
+  $('#save').onclick = () => save();
+  $('#skip').onclick = () => step(1);
+  $('#nospeech').onclick = () => save('');
+  $('#truth').focus();
+}
+
+async function save(forced) {
+  const c = at();
+  if (!c) return;
+  const text = forced !== undefined ? forced : ($('#truth')?.value ?? '').trim();
+  await fetch('/api/label', {method:'POST',
+    body: JSON.stringify({path: c.path, text})});
+  /* Which clip is next is decided against the list on screen, before the
+     reload, so that a call arriving at the top while you were typing cannot
+     send "save & next" somewhere you did not ask for. */
+  const i = indexOf(c.path);
+  const next = clips[i + 1] ? clips[i + 1].path : c.path;
+  /* Render the payload we just fetched rather than the array it replaces --
+     that array is a label out of date and possibly a clip short. */
+  apply(await fetch('/api/clips').then(r => r.json()));
+  select(next);
+}
+
+document.addEventListener('keydown', e => {
+  const typing = e.target.tagName === 'TEXTAREA';
+  if (typing && e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); save(); return; }
+  if (typing && e.key === 'Escape') { e.target.blur(); return; }
+  if (typing) return;
+  if (e.key === ' ') { e.preventDefault(); playWhole(); }
+  else if (e.key >= '1' && e.key <= '9') playKeyup(Number(e.key) - 1);
+  else if (e.key === 'j' || e.key === 'ArrowDown') step(1);
+  else if (e.key === 'k' || e.key === 'ArrowUp') step(-1);
+  else if (e.key === 'n') save('');
+  else if (e.key === 'Enter') $('#truth')?.focus();
+});
+
+poll();
+setInterval(poll, POLL_MS);
+</script>
+</body>
+</html>

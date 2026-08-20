@@ -2,7 +2,7 @@
 import json, os, sys, tempfile, time
 from collections import deque
 from pathlib import Path
-from . import core
+from . import core, segments as _segments
 
 # --------------------------------------------------------------- mock
 MOCK = [
@@ -48,9 +48,18 @@ def trunk(cfg):
             if cfg["talkgroups"] and tg not in cfg["talkgroups"]:
                 continue
             print(f"[trunk] {wav.name} tg={tg}")
-            core.publish(cfg["talkgroups"].get(tg, f"TG {tg}"),
-                         core.transcribe(wav, cfg["whisper_model"]),
-                         meta.get("start_time") or time.time(), cfg)
+            # One publish per keyup, not per recorded call: trunk-recorder holds
+            # the channel through the hang time exactly as Broadcastify's
+            # recorder does, so a reply lands in the same wav. start_time is
+            # when the grant opened, which is when the FIRST keyup started, so
+            # adding the span's own offset is a correction and not a guess --
+            # without it two voices share a timestamp and the display draws them
+            # as simultaneous.
+            dept = cfg["talkgroups"].get(tg, f"TG {tg}")
+            ts = meta.get("start_time") or time.time()
+            for sp in core.transcribe_spans(wav, cfg):
+                core.publish(dept, sp["text"], _segments.when(sp, ts), cfg,
+                             audio=wav, span=sp)
             core.report_ok()
         time.sleep(2)
 
@@ -169,6 +178,23 @@ def _bcfy_normalize(c):
             c.get("url"))
 
 
+def _bcfy_ident(rec, tg, ts):
+    """A stable identity for one record, for the dedupe ring.
+
+    "{tg}-{ts}" is not one: ts is a whole second and two transmissions on the
+    same talkgroup can share it (a 1s "Medic 16." landing in the same second as
+    the tail of a simulcast copy). Whichever arrived second was silently
+    dropped, which looks exactly like the fetch bug it hides inside. Prefer the
+    record's own id, then the MP3 url -- unique per call, since it names the
+    stored file -- and keep tg-ts only as a last resort.
+    """
+    for k in ("id", "callId", "call_id", "uuid", "filename"):
+        v = rec.get(k)
+        if v:
+            return f"id:{v}"
+    return f"url:{rec['url']}" if rec.get("url") else f"tgts:{tg}-{ts}"
+
+
 def bcfy_check(cfg):
     """One request against the configured endpoint, reporting what actually failed.
 
@@ -243,6 +269,85 @@ def bcfy_check(cfg):
     return 0, None
 
 
+def _keep_audio(cfg, tg, ts, data):
+    """Write the raw call audio to audio_dir, if one is configured."""
+    d = cfg.get("audio_dir")
+    if not d:
+        return None
+    try:
+        out = Path(d)
+        out.mkdir(parents=True, exist_ok=True)
+        p = out / f"{int(ts)}-{tg}.mp3"
+        p.write_bytes(data)
+        print(f"  .  saved {p}")
+        return p
+    except Exception as e:
+        print(f"[bcfy] could not save audio: {e}", file=sys.stderr)
+
+
+def _bcfy_handle(cfg, rec, seen):
+    """Fetch, transcribe and publish one record. Raising here loses only this one.
+
+    `seen` is appended to only where the record is genuinely finished with, so
+    that the re-read window (see broadcastify()) can retry the rest:
+      published        -> seen, obviously.
+      too old          -> seen; it can never become interesting again.
+      no audio url     -> NOT seen. A record can be indexed before its MP3 is
+                          written, and with lag > 0 the same record comes round
+                          again a few seconds later, by which time it may have
+                          one. Marking it seen made that unrecoverable.
+      raised anything  -> NOT seen. A blip on the clip download used to cost the
+                          transmission permanently; the re-read is already paid
+                          for, so retrying inside the window is free.
+    """
+    import requests
+    tg, ts, url = _bcfy_normalize(rec)
+    key = _bcfy_ident(rec, tg, ts)
+    if key in seen or tg not in cfg["talkgroups"]:
+        return
+    # Anything older than the display hold is already invisible, so
+    # transcribing it is pure waste.
+    if time.time() - ts > cfg["hold_seconds"]:
+        seen.append(key)
+        return
+    if not url:
+        print(f"[bcfy] call tg={tg} ts={int(ts)} has no audio url yet; "
+              f"fields={sorted(rec)}", file=sys.stderr)
+        return
+    print(f"[bcfy] call tg={tg} ts={int(ts)}")
+    audio = requests.get(url, timeout=30).content
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+        f.write(audio)
+        tmp = f.name
+    # Optional clip archive. Transcription accuracy can only be tuned against
+    # the audio that produced a bad transcript, and by then the live call is
+    # long gone.
+    kept = _keep_audio(cfg, tg, ts, audio)
+    try:
+        # Everything downstream works off the archived clip when there is one,
+        # so the incident log can link to those bytes instead of copying them
+        # and leaving two files, two review entries, and two things to label
+        # for one transmission. tmp is the fallback and still matters: with
+        # audio_dir unset the archive does not exist, and the incident log
+        # would otherwise have nothing to keep.
+        clip = str(kept or tmp)
+        # A record is a channel grant, and the grant holds through the hang
+        # time, so two people keying up seconds apart arrive as one mp3 under
+        # one timestamp -- "Dispatch 16, that is a negative." answered by
+        # "Clear, thank you." was filed as a single transmission. One publish
+        # per keyup fixes that; `ts` is when the grant opened, so the span's own
+        # offset is what puts the second voice at the second it spoke. The
+        # bytes are still downloaded and paid for exactly once, and every span
+        # is a reference into them.
+        dept = cfg["talkgroups"][tg]
+        for sp in core.transcribe_spans(clip, cfg):
+            core.publish(dept, sp["text"], _segments.when(sp, ts), cfg,
+                         audio=clip, span=sp)
+        seen.append(key)
+    finally:
+        os.unlink(tmp)
+
+
 def broadcastify(cfg):
     """Poll Live Calls. Assumes credentials are already verified.
 
@@ -250,64 +355,109 @@ def broadcastify(cfg):
     `firewall --check` already do, and running it here made every launch pay
     for the same verification twice.
     """
-    import requests
     # The endpoint documents a 5s floor, and it applies to the endpoint, not to
     # each group -- so one group per tick keeps us compliant while still giving
-    # every talkgroup a turn. Polling faster would not save or cost money
-    # either way: billing is per record read, so an empty poll is free.
+    # every talkgroup a turn.
     interval = max(5, int(cfg["poll_seconds"]))
     groups = sorted(cfg["talkgroups"]) or [None]
+    cycle = interval * len(groups)
+    lag = max(0, int(cfg.get("bcfy_lag_seconds") or 0))
 
-    # One cursor per group, since each group's lastPos advances independently.
-    # Anchored to the display window up front: left at None, every poll would
-    # re-request (and re-pay for) the server's default last-5-minutes window.
-    # Reaching back hold_seconds also absorbs Broadcastify's 10-30s ingest lag,
-    # which a now() anchor would race and drop calls to.
+    # --- the cursor, and what completeness costs ---------------------------
+    # `pos` filters on ts, the call START, but a call cannot be published until
+    # it ENDS and clears Broadcastify's 10-30s ingest. So the newest ts in a
+    # batch is not a safe watermark: a long transmission starting at T publishes
+    # after a short one starting at T+10, and once lastPos has moved to T+10 the
+    # long one is never inside any later window. It is not returned again, ever.
+    # Both halves of that gap are real here -- the saved clips include an 18s
+    # call on tg 2105 at ts 1787204196 and a 3s one at 1787204200 -- and the
+    # ingest lag alone is enough, since it varies per record. That is how a
+    # reply reaches the screen with nothing called before it.
+    #
+    # bcfy_lag_seconds holds the cursor that many seconds behind the wall clock,
+    # so a record is still inside the requested window when it finally shows up.
+    # There is no cheaper way to be complete: /calls/v1/live/ has no upper-bound
+    # parameter, so "newer than now-lag" also re-reads every record already
+    # published in that window, and reads are the bill. A record whose audio
+    # publishes P seconds after its start is read
+    #     1 + (lag - P) / cycle   times,   cycle = poll_seconds * len(talkgroups)
+    # because that is how many polls happen before the cursor passes its ts.
+    # Simulated offline against a scripted server -- 16 records/hour (the
+    # measured rate here), 8s calls, 20s ingest, so P = 28s, 10s cycle, at the
+    # measured $0.0006/record:
+    #
+    #   lag=0    1.0x  $0.0006/call  $0.0096/h  $7/mo  and it drops calls
+    #   lag=30   1.0x  $0.0006/call  $0.0096/h  $7/mo  covers ingest, not a
+    #                                                   long transmission
+    #   lag=60   4.0x  $0.0024/call  $0.0384/h  $28/mo default: 30s worst
+    #                                                   ingest + the 18s
+    #                                                   longest clip in the
+    #                                                   archive + one cycle
+    #   lag=120 10.0x  $0.0060/call  $0.0960/h  $69/mo pure overlap window,
+    #                                                   no added coverage
+    #
+    # So completeness costs about $21 a month here at the default, and only
+    # while there is traffic: an empty window is still free. The lever that
+    # buys it back cheaply is FIREWALL_POLL_SECONDS, which divides the
+    # multiplier -- lag=60 at poll_seconds=15 (a 30s cycle) is 2.1x -- for the
+    # price of seeing a call up to 30s later. Note this reverses the old rule
+    # that polling is free: with lag > 0 every poll re-reads the window's tail.
+    #
+    # What lag does NOT cost is display latency. A record enters the window the
+    # moment it publishes, whatever the cursor is doing, so the screen stays as
+    # live as the ingest allows; lag buys completeness with money, not delay.
+    #
+    # One cursor per group, since each advances independently. Anchored to the
+    # display window up front: left at None, every poll would re-request (and
+    # re-pay for) the server's default last-5-minutes window.
     pos = {g: time.time() - cfg["hold_seconds"] for g in groups}
     seen = deque(maxlen=2000)
-    cycle = interval * len(groups)
     print(f"[bcfy] system {cfg['bcfy_system_id']} tgs={groups} "
           f"one per {interval}s, so each every {cycle}s")
+    # 28s is the P above: an 8s call plus 20s of ingest, the middle of what
+    # this system does. Worth printing -- a display quietly paying 10x, or
+    # quietly dropping traffic, looks identical from the couch.
+    mult = 1 + max(0, lag - 28) / cycle if lag else 1.0
+    print(f"[bcfy] cursor {'trailing %ds behind now' % lag if lag else 'at lastPos'}"
+          f" -- {'complete' if lag else 'late-published calls WILL be missed'},"
+          f" ~{mult:.1f}x records read (~${mult * 0.0006:.4f}/call),"
+          f" no added display latency; "
+          + ("BCFY_LAG_SECONDS=0 is cheaper and lossy" if lag
+             else "raise BCFY_LAG_SECONDS to stop losing them"))
 
     i = 0
     while True:
         g = groups[i % len(groups)]
         i += 1
+        # Sampled before the fetch, not after the loop: transcription runs
+        # inline in this thread, so a slow decode can put a minute between the
+        # request and the cursor update. Advancing to (then - lag) would step
+        # straight over everything that published while whisper was busy.
+        t0 = time.time()
         try:
             calls, last = _bcfy_fetch(cfg, pos[g], g)
-            for rec in calls:
-                tg, ts, url = _bcfy_normalize(rec)
-                key = f"{tg}-{ts}"
-                if key in seen or tg not in cfg["talkgroups"]:
-                    continue
-                seen.append(key)
-                # Anything older than the display hold is already invisible, so
-                # transcribing it is pure waste.
-                if time.time() - ts > cfg["hold_seconds"]:
-                    continue
-                if not url:
-                    print(f"[bcfy] call tg={tg} has no audio url; "
-                          f"fields={sorted(rec)}", file=sys.stderr)
-                    continue
-                print(f"[bcfy] call tg={tg} ts={int(ts)}")
-                with tempfile.NamedTemporaryFile(suffix=".m4a", delete=False) as f:
-                    f.write(requests.get(url, timeout=30).content)
-                    tmp = f.name
-                try:
-                    core.publish(cfg["talkgroups"][tg],
-                                 core.transcribe(tmp, cfg["whisper_model"]), ts, cfg)
-                finally:
-                    os.unlink(tmp)
-            # lastPos advances this group's cursor so each poll only bills for
-            # new calls. It comes back 0 (or absent) on an empty result set, so
-            # hold the previous position rather than resetting -- a reset would
-            # drop the cursor back to the server's rolling 5-minute default and
-            # pay for the same records over and over.
-            pos[g] = last or pos[g]
-            core.report_ok()
         except Exception as e:
             core.report_error(e)
             print(f"[bcfy] error: {e}", file=sys.stderr)
+            time.sleep(interval)
+            continue
+        for rec in calls:
+            # Per record, because one malformed record used to abort the whole
+            # batch from the outer try -- every sibling behind it in the list
+            # went unprocessed, and the cursor stood still, so the survivors
+            # were fetched (and billed) a second time on the next poll.
+            try:
+                _bcfy_handle(cfg, rec, seen)
+            except Exception as e:
+                core.report_error(e)
+                print(f"[bcfy] dropped one record ({type(e).__name__}: {e}); "
+                      f"rest of batch continues", file=sys.stderr)
+        # max() so the cursor can only ever move forward: it must not fall back
+        # to the server's rolling 5-minute default and pay for the same records
+        # over and over. With lag=0 it is lastPos again, which comes back 0 (or
+        # absent) on an empty result set, hence the fallback to the old value.
+        pos[g] = max(pos[g], t0 - lag) if lag else (last or pos[g])
+        core.report_ok()
         time.sleep(interval)
 
 

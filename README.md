@@ -74,6 +74,42 @@ and falls into demo mode:
 - `HOME_UNITS` is a regex of the rigs from stations that route past your house.
   Those chips get a marker, heavier weight, and the accent colour.
 
+### The transcript and the audio
+
+A bar along the bottom carries the call's radio traffic: one line per transmission,
+timed from the dispatch, with the dispatch itself set brighter than the chatter
+around it. Click a line to hear it. The bar has play/pause, a scrub, and a status
+that says what is loaded or what is wrong with it.
+
+New transmissions play themselves as they arrive, one at a time, in the order they
+were said. Two rules keep that from turning into a nuisance:
+
+- The first payload after a page load is adopted silently. Opening the screen in
+  the middle of a working fire should not replay the whole call at you.
+- Nothing older than three minutes is ever played, so reconnecting after an outage
+  does not empty an hour of backlog into the room.
+
+Both halves are switches, and they are two switches rather than one because they
+fail in opposite directions. The transcript is silent and can sit on a hallway
+screen all day. The audio cannot: there are rooms where a radio playing itself at
+3am is the reason the whole thing gets unplugged.
+
+| Key | Chip | Does |
+|---|---|---|
+| **T** | `transcript` | The bar itself: transcript, scrub, replay |
+| **A** | `audio` | Whether new transmissions play on arrival |
+| **SPACE** | — | Play/pause. Also the gesture browsers demand before a page is allowed to make noise |
+
+Both settings live in `localStorage`, per screen rather than in the config, because
+which room the display is in is what decides them. A screen that reboots comes back
+the way it was left.
+
+The clips are the ones the poller already downloaded, held in memory and served from
+`/api/clip`. Replaying a call never re-fetches it from the source — on Broadcastify
+that would be paying for the same record twice. The tape holds the last 40 clips or
+48MB, whichever comes first; past that, a line stays in the transcript and says the
+clip is no longer held.
+
 Nothing about the design is load-bearing. The only contract with the rest of the
 system is one object:
 
@@ -377,7 +413,13 @@ library in `config.py`, so mock mode still has no dependencies.
 | `bcfy_api_base` | `https://api.bcfy.io/v1` | Verify against the live docs |
 | `talkgroups` | the five above | Decimal id to display name |
 | `poll_seconds` | 5 | Broadcastify poll interval |
-| `whisper_model` | `base.en` | `tiny.en`, `base.en` or `small.en` |
+| `whisper_model` | `small.en` | `tiny.en`, `base.en`, `small.en`, `medium.en` |
+| `whisper_vocab` | `places.py` | Names to bias the recogniser toward |
+| `whisper_vad` | `false` | Silero VAD; on, it truncates noisy transmissions |
+| `audio_dir` | `~/Documents/firewall-data/clips` | Archive call audio here for replaying |
+| `incident_dir` | `~/Documents/firewall-data/incidents` | Per-incident audio and transcript log |
+| `corpus_path` | `~/Documents/firewall-data/corpus.jsonl` | Hand-typed truth for `--score` |
+| `incident_gap_seconds` | 900 | Quiet time that closes an incident |
 | `trunk_dir` | `./trunk-out` | Where trunk-recorder writes |
 | `use_llm_parser` | `false` | Needs `ANTHROPIC_API_KEY` |
 | `hold_seconds` | 600 | How long a call stays on screen |
@@ -393,6 +435,11 @@ library in `config.py`, so mock mode still has no dependencies.
 {
   "call": { "dept": "...", "type": "...", "address": "...",
             "city": "...", "units": ["E2"], "ts": 1787115224.0 },
+  "radio": [
+    { "id": "41", "ts": 1787115224.0, "dispatch": true,
+      "text": "Engine 2, Ladder 1, respond to 340 Sagamore Parkway West...",
+      "url": "/api/clip?id=41" }
+  ],
   "ok": true,
   "error": null,
   "last_ok": 1787115224.0,
@@ -403,6 +450,14 @@ library in `config.py`, so mock mode still has no dependencies.
 `call` is `null` when nothing is running. When `ok` is `false`, `error` carries the
 source's last failure verbatim, and the display renders its error state with that
 text. `GET /` serves the display.
+
+`radio` is the current call's transmissions, oldest first: the dispatch, then the
+chatter after it. It is grouped by the radio's own rhythm rather than by the call's
+timestamp — a transmission mentioning a fire re-parses as a dispatch and replaces
+the call, and keying on that would silently drop everything said before it.
+
+`GET /api/clip?id=41` returns that transmission's audio from memory, with byte-range
+support so the display's scrub bar can seek. `404` once it has aged out of the tape.
 
 ---
 
@@ -454,7 +509,179 @@ That is on clean text. **Real whisper output off a radio is not clean**, and the
 regex is brittle in exactly the way regexes are. For garbled transcripts set
 `FIREWALL_USE_LLM_PARSER=true` and fill in `ANTHROPIC_API_KEY` (about $0.0002 per
 call, `pip install -e ".[llm]"`). It falls back to regex automatically if the call
-fails, so turning it on costs nothing but the key.
+fails, so turning it on costs nothing but the key. The prompt carries the local
+place names, so it can undo the mishearings below rather than just parse around
+them.
+
+---
+
+## Transcription
+
+Trunked radio is 8kHz, compressed twice, and clipped at both ends of every
+transmission. Whisper's errors on it are phonetic, not random, and the words it
+invents are the local ones it has never heard:
+
+```
+Purdue      -> "pretty" / "Padufa"      Earhart  -> "your heart" / "IHUT"
+Medic 16    -> "firemenic 16"           Sagamore -> "Sagamo"
+```
+
+Measured on 20 clips -- five dispatches spoken by four voices, band-limited to
+300-3400Hz and mixed with noise at clean/15dB/8dB/3dB SNR -- scoring the place
+and unit names above, whether the call reaches the screen at all, and whether
+the address it lands on is the right one:
+
+| configuration | names heard | reaches screen | right address | s/clip |
+|---|---|---|---|---|
+| `base.en`, VAD on, no vocabulary | 10/56 (18%) | 14/20 | 2/20 | 0.7 |
+| `base.en` + vocabulary | 29/56 (52%) | | | 0.5 |
+| `small.en`, no vocabulary | 13/56 (23%) | | | 1.4 |
+| `small.en` + vocabulary | 37/56 (66%) | | | 1.3 |
+| **`small.en` + vocabulary, VAD off** | **45/56 (80%)** | **20/20** | **14/20** | 1.2 |
+| `medium.en` + vocabulary | 31/56 (55%) | | | 3.5 |
+
+Chatter was promoted to a dispatch 0 times out of 8 in every configuration, so
+none of this made the display trigger-happy. Four things earn their place:
+
+1. **`small.en`, not `base.en`** (`FIREWALL_WHISPER_MODEL`). `medium.en` is
+   *worse* here at 3x the cost -- it returned an empty transcript on one clip --
+   so `small.en` is both the floor and the ceiling worth paying for on CPU.
+2. **The vocabulary bias.** Every clip is decoded with the names in
+   `places.py` passed as whisper `hotwords`. On its own that is the single
+   largest win, 13/56 -> 37/56. Extend it with `FIREWALL_WHISPER_VOCAB`. Only
+   the first ~220 tokens survive the prompt cap, so length is the constraint
+   that matters -- reordering the same list moved the score by one clip, adding
+   a hall you keep hearing is what helps.
+3. **The VAD is off.** This is not the obvious setting. Silero decides a noisy
+   transmission stops being speech partway through and truncates the rest, which
+   is how a dispatch comes out as `"...being around the Earhart residen"`.
+   Turning it off recovered 8 more names at identical latency and cost nothing:
+   noise-only keyups still transcribe to nothing, because whisper's own
+   `no_speech_threshold` already drops them. `FIREWALL_WHISPER_VAD=true` puts it
+   back for long recordings that contain real silence.
+4. **`FIREWALL_USE_LLM_PARSER=true`.** The remaining gap is not the recogniser.
+   In 9 of the 11 clips that still land on the wrong address, the building name
+   *is* in the transcript -- the sentence around it is too mangled for a regex.
+   The parser prompt names the same places, so it recovers those.
+
+**Replay, do not guess.** Audio and incidents land in
+`~/Documents/firewall-data/`, outside the repo, because the recordings are not
+yours to redistribute. Let it collect real calls, then tune against them:
+
+```
+firewall --transcribe clips/1787186926-2105.mp3
+FIREWALL_WHISPER_MODEL=base.en firewall --transcribe clips/1787186926-2105.mp3
+```
+
+It prints the transcript, the parse, and how long the model took. The numbers
+above come from synthetic speech pushed through a radio-shaped filter, not from
+P25 vocoder audio: trust the ranking, re-measure the percentages on your own
+clips.
+
+Whichever model you run, unit numbers come back both ways -- "Engine 2" on one
+call and "engine two" on the next -- so the parser folds spoken numbers to
+digits before it looks for units. It also tolerates the comma whisper inserts
+where the dispatcher paused ("respond to 340, Sagamore Parkway West"), and falls
+back to matching any known local place named anywhere in the transcript when the
+sentence structure is gone entirely.
+
+## Ground truth
+
+Everything above was measured on synthetic speech pushed through a radio-shaped
+filter, because there was no labelled real audio to measure against. The fix is
+not clever: listen to the clips and type what was actually said.
+
+```
+firewall --label clips/          # plays each clip, you type what you heard
+firewall --score                 # word error rate under the current settings
+```
+
+The comfortable way to do it is the review page the server already serves at
+**`/review`**, alongside the display:
+
+```
+firewall --source broadcastify --open        # display on /, review on /review
+```
+
+Every saved clip is listed newest first, dispatches marked, labelled ones
+ticked. Selecting one plays it immediately, shows what the machine heard with
+the words your truth does not contain called out in clay, and puts the cursor
+in the box. `enter` saves and moves to the next clip, `shift enter` is a
+newline, `esc` leaves the box and then `space` replays, `j`/`k` move, `n` marks
+no speech. There is a 0.75x button and a loop button, which is what garbled
+transmissions actually need, and a re-transcribe button that runs the current
+settings against that one clip. You should never need the mouse.
+
+`firewall --label PATH` is the same job from the terminal if you prefer it:
+plays each unlabelled clip through `afplay` and reads what you type (`r`
+replays, `s` skips, `q` quits). Either way, type what was *said*, including
+the parts the radio ate; blank means no speech, which is a useful label in its
+own right.
+
+`--score` then transcribes every labelled clip with whatever settings are
+currently in force and prints the word error rate, so a change to the model,
+the vocabulary or the VAD can be judged on your audio rather than mine:
+
+```
+firewall --score
+FIREWALL_WHISPER_MODEL=base.en firewall --score
+FIREWALL_WHISPER_VAD=true firewall --score
+```
+
+The corpus is JSONL, one `{"audio": ..., "text": ...}` per line, so it outlives
+any change to this program and can be edited in any text editor.
+
+---
+
+## Incidents
+
+A dispatch is not one transmission, it is a conversation, and the display only
+ever shows the first line of it. Everything after -- the units acknowledging,
+the arrival, what they found -- was being transcribed and dropped.
+
+`FIREWALL_INCIDENT_DIR` (default `~/Documents/firewall-data/incidents`) keeps it. An incident opens on a
+dispatch, collects every transmission on that department afterwards with its
+audio, and closes when the radio says it is over. The closers are `code 4`,
+`in service`, `clear the scene`, `cancel`, `disregard` and `returning to
+quarters` -- plus `and service`, which is not a typo but how whisper hears
+"in service" off a radio. Failing all of those it closes after
+`FIREWALL_INCIDENT_GAP` seconds of quiet.
+
+```
+firewall --incidents                  # newest first
+firewall --replay                     # the most recent, as a timeline
+firewall --replay <id> --play         # and play each transmission
+```
+
+```
+  1787195476-purdue-fd-medical-alcohol
+  2026-08-19 23:11:16  Purdue FD  Medical: Alcohol @ Honors College  ['M16']
+  closed after 424s
+
+  >> +   0s  Purdue Fire, Medic 16, stand by for possible alcohol poisoning ...
+  >> +  31s  Purdue Fire, Medic 16, Unit 100, possible alcohol poisoning at Honors College.
+     + 187s  Sixteens, en route, on herself.
+     + 237s  Dispatch, medic 17 en route.
+     + 424s  Medic 16 and service returning.
+```
+
+A pre-alert and the dispatch proper are one incident, not two. Any dispatch
+arriving while the department's conversation is still live refines the running
+call rather than forking a new one, which is why the address above is the
+Honors College one and not the pre-alert's. Forking needs actual evidence of a
+second call -- dispatcher phrasing *plus* a different call type or a different
+place -- because without that test, ordinary chatter that happened to parse as
+a dispatch could retitle a working fire under the reader. Refinement is
+one-way: a type is written once, and an address is only replaced by the same
+place said more precisely.
+
+---
+
+**Broadcastify's own transcripts are not an option here.** Broadcastify Calls
+transcription exists, but it is a technology preview scoped to fire dispatch in
+the Dallas-Fort Worth metro, and the Live Calls records for system 9099 carry no
+transcript field -- just `groupId`, `ts`, `url`, `duration`, `descr`, `freq` and
+friends. Nothing to read even if you paid for it.
 
 ---
 
@@ -575,6 +802,10 @@ firewall/
   sources.py      mock, broadcastify and trunk sources
   core.py         shared state, whisper, publish, source health
   parse.py        transcript to structured call
+  places.py       local names, for the recogniser and the parser
+  incidents.py    grouping, recording and replaying whole incidents
+  review.html     the labelling UI, served at /review
+  corpus.py       hand-typed truth, and the score against it
   display.html    the screen, standalone and editable live
 ```
 

@@ -79,8 +79,14 @@ body{
   display:grid;
   grid-template-rows:1fr auto;
   padding:var(--sp-8) var(--sp-12) var(--sp-8) var(--sp-16);
+  /* --radio-h is measured from the bar itself, so the meta row clears it
+     however far the transcript has grown. Zero when the bar is off. */
+  padding-bottom:calc(var(--sp-8) + var(--radio-h,0px));
 }
-@media (max-width:768px){ #screen{padding:var(--sp-6)} }
+@media (max-width:768px){
+  #screen{padding:var(--sp-6);
+          padding-bottom:calc(var(--sp-6) + var(--radio-h,0px))}
+}
 
 /* freshness: drains left to right over hold_seconds */
 #age{position:fixed;top:0;left:0;height:2px;width:0;background:var(--tone);
@@ -98,6 +104,18 @@ h1{
   text-wrap:balance;
   max-width:13ch;                /* in ch, so it tracks the headline size */
 }
+/* An address standing in for a call type, when the parser could not name the
+   call. Deliberately not the same headline: one step down the scale and at a
+   longer measure, because an address is three times the length of "Structure
+   Fire" and at h1 size it wraps into a wall of type. It has to read as a
+   location that was given the headline, not as a title that lost its words. */
+h1.place{font-size:clamp(1.75rem,4.6vw,3rem);max-width:20ch;
+         letter-spacing:normal;font-weight:500}
+/* Neither type nor address: quiet and true. The department is in the
+   attribution line below, where departments belong -- it is not a title. */
+h1.busy{font-size:clamp(1.75rem,4.6vw,3rem);max-width:20ch;
+        font-weight:500;color:var(--text-muted)}
+
 /* Grouping by uneven spacing: address hugs the headline, the attribution
    line sits a full step further away, units further still. */
 .address{margin:var(--sp-3) 0 0;font-size:clamp(1.25rem,2.6vw,2rem);
@@ -120,6 +138,11 @@ h1{
 .eta.near{color:var(--tone);font-weight:500}
 .eta .sub{color:var(--text-muted);font-weight:400}
 .eta .approx{opacity:.65}
+/* The line is emitted for every call now, not only for the ones that arrived
+   with an ETA attached: the radio can promote it to "on scene" minutes after
+   the first paint, and the element has to already be there when it does. An
+   empty line must not push the units down a step in the meantime. */
+.eta:empty{display:none}
 
 .units{margin-top:var(--sp-4);display:flex;flex-wrap:wrap;gap:var(--sp-2);
        padding:0;list-style:none}
@@ -133,6 +156,49 @@ h1{
 .units li.home{color:var(--tone);border-color:var(--tone);font-weight:500}
 .units li.home::before{content:"";display:inline-block;width:.42em;height:.42em;
   background:var(--tone);vertical-align:baseline;margin-right:.5em}
+
+/* A call the radio has cleared is not deleted off the screen the moment it
+   ends -- it stays for its grace period, greyed, so that someone looking up
+   ten seconds too late still learns what happened rather than watching a
+   headline vanish mid-sentence. */
+.call.closed h1,.call.closed .address{color:var(--text-muted)}
+
+/* ---------------- other live calls ----------------
+   Two structure fires do not get two headlines. This is read from the far end
+   of a hallway, where a grid of equal boxes resolves to no information at all,
+   so the newest dispatch keeps the whole treatment and everything else running
+   becomes a compact list beneath it: what it is, where, whose, and where it
+   has got to. The count is stated in words because "how many are running" is
+   the question you ask from across the room, and counting list rows at that
+   distance is not answering it.
+
+   Each row carries its own --tone, scoped to the row, so a medical call in the
+   list stays pine while a fire in the headline holds clay. */
+.others{margin-top:var(--sp-6);max-width:56ch}
+.others:empty{display:none}
+.others .count{margin:0 0 var(--sp-2);font-size:var(--text-sm);
+               color:var(--text-muted)}
+.others ul{margin:0;padding:0;list-style:none;display:flex;
+           flex-direction:column;gap:var(--sp-1)}
+.others li{animation:enter var(--dur-base) var(--ease-standard) both}
+.others button{
+  display:flex;gap:var(--sp-3);align-items:baseline;width:100%;text-align:left;
+  background:none;border:0;border-left:2px solid var(--tone);
+  padding:var(--sp-1) 0 var(--sp-1) var(--sp-3);font:inherit;
+  color:var(--text-muted);cursor:pointer;
+  transition:color var(--dur-fast) var(--ease-standard);
+}
+.others button:hover{color:var(--text-body)}
+.others .otype{color:var(--tone);font-weight:500;flex:none}
+/* Same rule as the headline: a row whose title is really its address is set as
+   an address, not dressed up as a category it does not have. */
+.others li.place .otype{color:var(--text-body);font-weight:400;
+                        flex:0 1 auto;min-width:0;overflow:hidden;
+                        text-overflow:ellipsis;white-space:nowrap}
+.others .oaddr{flex:1 1 auto;min-width:0;overflow:hidden;
+               text-overflow:ellipsis;white-space:nowrap}
+.others .ostat{font-family:var(--font-mono);font-size:var(--text-sm);flex:none}
+.others li.closed{opacity:.55}
 
 /* ---------------- meta row ---------------- */
 .meta{display:flex;justify-content:space-between;align-items:baseline;
@@ -169,11 +235,126 @@ h1{
   outline-offset:var(--focus-offset);border-radius:var(--r-md);
 }
 
-#mode{position:fixed;top:var(--sp-4);right:var(--sp-4);
+/* ---------------- radio: transcript + replay ----------------
+   Fixed to the bottom edge rather than placed in the #screen grid, and this
+   is load-bearing rather than cosmetic: #screen is rebuilt with innerHTML
+   whenever the dispatch changes, and an <audio> element inside that subtree
+   would be destroyed -- cutting a transmission off mid-word every time a new
+   call lands. Out here it survives every repaint.
+
+   #screen is given room for it by --radio-h, measured from the real element,
+   so the meta row is never covered whatever the transcript grows to. */
+#radio{
+  position:fixed;left:0;right:0;bottom:0;
+  padding:var(--sp-3) var(--sp-12) var(--sp-4) var(--sp-16);
+  background:var(--surface);border-top:1px solid var(--border);
+  display:grid;gap:var(--sp-2);
+}
+#radio[hidden]{display:none}
+@media (max-width:768px){ #radio{padding:var(--sp-3) var(--sp-6)} }
+
+/* The transcript is what the machine heard, so it is set in mono and left
+   unstyled otherwise: no quotation marks, nothing that implies it is a
+   verbatim record. The dispatch line is brighter than the chatter around it
+   because it is the one line the headline above was derived from. */
+#tape{margin:0;padding:0;list-style:none;max-height:8.5rem;overflow-y:auto;
+      scrollbar-width:thin}
+/* A clock the display is correcting for is a fault on the device, so it is
+   clay rather than muted: the times on screen are right, but somebody still
+   needs to go and fix that box. */
+.meta .skew{display:block;margin-top:var(--sp-1);color:var(--clay-300)}
+.meta .skew:empty{display:none}
+
+#tape li{display:block}
+#tape button{
+  display:flex;gap:var(--sp-3);align-items:baseline;width:100%;text-align:left;
+  background:none;border:0;padding:2px 0;font:inherit;color:var(--text-muted);
+  cursor:pointer;transition:color var(--dur-fast) var(--ease-standard);
+}
+#tape button:hover:not(:disabled){color:var(--text-body)}
+#tape button:disabled{cursor:default}
+/* Two stamps per row. The offset is the one worth reading -- how far into the
+   call this was said -- but it is also the one nobody can check, and it was
+   quietly wrong for months. The wall clock next to it is verifiable at a
+   glance against any other clock in the building, which is the whole point of
+   putting it there. The playing marker gets a reserved slot on every row so
+   the columns do not step sideways when it appears. */
+#tape .at{font-family:var(--font-mono);font-size:0.8125rem;
+          color:var(--text-muted);flex:none;min-width:6.4em}
+#tape .at::before{content:"";display:inline-block;width:1em}
+#tape .off{font-family:var(--font-mono);font-size:0.8125rem;
+           color:var(--text-muted);flex:none;min-width:3.6em;opacity:.65}
+#tape .said{font-size:var(--text-sm);line-height:1.4}
+#tape li.dispatch button{color:var(--text-body)}
+/* Playing now: colour AND a leading marker, same rule as the home units. */
+#tape li[aria-current="true"] button{color:var(--tone)}
+#tape li[aria-current="true"] .at::before{content:"▸";color:var(--tone)}
+
+.bar{display:flex;align-items:center;gap:var(--sp-3);flex-wrap:wrap}
+.bar button.play{
+  font-family:var(--font-mono);font-size:var(--text-sm);color:var(--text-body);
+  background:none;border:1px solid var(--border);border-radius:var(--r-md);
+  padding:var(--sp-1) var(--sp-3);cursor:pointer;flex:none;
+  transition:border-color var(--dur-fast) var(--ease-standard);
+}
+.bar button.play:hover:not(:disabled){border-color:var(--text-muted)}
+.bar button.play:disabled{opacity:.4;cursor:default}
+/* Back to live is the one lit control in the bar, because it only exists while
+   you are somewhere you probably did not mean to still be. */
+.bar button.live{color:var(--tone);border-color:var(--tone)}
+.bar button.live[hidden]{display:none}
+.seek{flex:1 1 auto;min-width:8rem;position:relative;height:1.25rem;padding:0;
+      border:0;background:none;cursor:pointer}
+.seek::before{content:"";position:absolute;inset:50% 0 auto;height:2px;
+              transform:translateY(-50%);background:var(--n-800)}
+.seek i{position:absolute;left:0;top:50%;height:2px;width:0;
+        transform:translateY(-50%);background:var(--tone)}
+.bar .t{font-family:var(--font-mono);font-size:var(--text-sm);
+        color:var(--text-muted);flex:none;min-width:6.5em;text-align:right}
+/* Shrinks before the scrub bar does: the bar is the control, the status is
+   commentary on it. */
+.bar .who{font-size:var(--text-sm);color:var(--text-muted);flex:0 1 auto;
+          min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bar .who.warn{color:var(--clay-300)}
+/* One message is worth its own line: the blocked notice names a settings path,
+   and a settings path cut off at an ellipsis helps nobody. It drops below the
+   controls rather than squeezing them, and --radio-h is measured, so the
+   screen above makes room for it on its own. */
+.bar .who.note{flex:1 0 100%;white-space:normal;overflow:visible;
+               text-overflow:clip;line-height:1.4}
+.bar .who .hint{display:block;color:var(--text-muted);opacity:.85;
+                font-family:var(--font-mono);font-size:0.8125rem;
+                margin-top:var(--sp-1)}
+
+/* ---------------- chips ----------------
+   Controls on a screen nobody stands at: parked in the corner, dimmed to the
+   point of ignorable, and brought back by the mouse or by keyboard focus.
+   Both features they toggle are also on a key (T and A), so the chips are a
+   reminder of state more than they are the way to change it. */
+#chips{position:fixed;top:var(--sp-4);right:var(--sp-4);display:flex;
+       gap:var(--sp-2);opacity:.25;
+       transition:opacity var(--dur-base) var(--ease-standard)}
+body.pointer #chips,#chips:focus-within,#chips:hover{opacity:1}
+.chip{
   font-family:var(--font-mono);font-size:var(--text-sm);color:var(--text-muted);
   border:1px solid var(--border);border-radius:var(--r-md);
-  padding:var(--sp-1) var(--sp-2);background:none}
-#mode[hidden]{display:none}
+  padding:var(--sp-1) var(--sp-2);background:none;cursor:pointer;
+  transition:color var(--dur-fast) var(--ease-standard),
+             border-color var(--dur-fast) var(--ease-standard);
+}
+.chip[hidden]{display:none}
+.chip[aria-pressed="true"]{color:var(--pine-300);border-color:var(--pine-300)}
+/* Off is stated, not implied by a missing highlight. */
+.chip[aria-pressed="false"]::after{content:" off";opacity:.7}
+.chip[aria-pressed="true"]::after{content:" on"}
+/* Audio switched on but the browser has never let this page make a sound. Said
+   up here as well as in the bar, because the bar is the half a viewer is most
+   likely to have switched off, and a silent screen must never be mistaken for
+   a quiet radio. */
+.chip.blocked[aria-pressed="true"]{color:var(--clay-300);border-color:var(--clay-300)}
+.chip.blocked[aria-pressed="true"]::after{content:" blocked"}
+
+body.pointer{cursor:auto}
 
 @media (prefers-reduced-motion:reduce){
   *,*::before,*::after{animation-duration:.01ms!important;
@@ -184,7 +365,27 @@ h1{
 <body>
 <div id="age"></div>
 <main id="screen"></main>
-<button id="mode" hidden type="button"></button>
+
+<section id="radio" hidden aria-label="Radio traffic">
+  <ol id="tape"></ol>
+  <div class="bar">
+    <button class="play" id="play" type="button" aria-label="Play">▶</button>
+    <button class="seek" id="seek" type="button" aria-label="Seek"><i></i></button>
+    <span class="t" id="rtime">0:00 / 0:00</span>
+    <button class="play live" id="golive" hidden type="button"
+            title="L — stop replaying and follow the radio again">▸ live</button>
+    <span class="who" id="rwho"></span>
+  </div>
+</section>
+<audio id="au" preload="none"></audio>
+
+<div id="chips">
+  <button class="chip" id="t-tape" type="button" aria-pressed="true"
+          title="T — transcript and replay bar · L — back to live after a replay · C — next running call · Esc — newest">transcript</button>
+  <button class="chip" id="t-auto" type="button" aria-pressed="true"
+          title="A — play each new transmission as it arrives · space — play/pause">audio</button>
+  <button class="chip" id="mode" hidden type="button"></button>
+</div>
 
 <script>
 /* ---------------------------------------------------------------------------
@@ -210,37 +411,248 @@ const el = document.getElementById('screen');
 const bar = document.getElementById('age');
 const modeBtn = document.getElementById('mode');
 
-let current = null, painted = null, mode = 'boot', demoIndex = 0, lastError = null;
+/* `calls` is every call still running, newest dispatch first, and `current` is
+   whichever one holds the headline. They used to be the same single thing, and
+   that is the bug: a Purdue medical run dispatched while a West Lafayette
+   structure fire was still working overwrote the fire, and the fire simply
+   left the screen with nobody told. */
+let calls = [], current = null;
+let painted = null, mode = 'boot', demoIndex = 0, lastError = null;
+
+/* Focus is normally automatic -- the newest dispatch -- and a viewer can move
+   it. It lapses back on its own, because this screen is unattended most of the
+   time and whoever pressed C is usually not still standing there. */
+let focusId = null, focusUntil = 0;
+const FOCUS_HOLD = 120;
 
 const esc = t => String(t??'').replace(/[<>&]/g,c=>({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
-const ago = a => a<60 ? `${a|0}s ago` : `${(a/60)|0}m ago`;
-const mmss = s => s<60 ? `${s|0}s` : `${(s/60)|0}:${String((s%60)|0).padStart(2,'0')}`;
+const two = n => String(n).padStart(2,'0');
 
-/* The ETA is an estimate dominated by turnout time, so it is rendered as a
-   countdown but never as a precise one: "~1:20", and it degrades to "now"
-   rather than counting into negative numbers it cannot possibly know. */
-function etaText(eta){
-  if(!eta) return '';
-  const now = Date.now()/1000;
-  if(eta.passes_you && eta.pass_at != null){
-    const t = eta.pass_at - now;
-    const sub = eta.closest_metres!=null ? ` · ${eta.closest_metres} m away` : '';
-    return t > 0 ? `<span class="approx">passes you in ~</span>${mmss(t)}${
-                     `<span class="sub">${sub}</span>`}`
-                 : `passing you now<span class="sub">${sub}</span>`;
-  }
-  if(eta.scene_at == null) return '';
-  const t = eta.scene_at - now;
-  const from = eta.station ? ` · ${eta.station}` : '';
-  return t > 0 ? `<span class="approx">on scene in ~</span>${mmss(t)}<span class="sub">${from}</span>`
-               : `<span class="approx">on scene</span><span class="sub">${from}</span>`;
+/* ---------------------------------------------------------------------------
+   The clock this screen does its arithmetic against.
+
+   Every timestamp on the wire is the server's, and every countdown, age and
+   +Xs on this screen is one of them subtracted from "now". If the two machines
+   disagree, all of it is wrong by the difference, silently and in the same
+   direction -- and a wall-mounted display is precisely the device whose clock
+   nobody ever looks at closely enough to notice. A Pi with no RTC that came up
+   before NTP settled is not an exotic case, it is a Tuesday.
+
+   So `now()` is the corrected clock, and nothing on this screen may use
+   Date.now() for anything it compares against a server timestamp. Local
+   durations -- how long ago the viewer pressed a key -- stay on the raw clock,
+   because both ends of those are measured here.
+   --------------------------------------------------------------------------- */
+let SKEW = 0;                    /* seconds to add to this browser's clock */
+const SKEW_KEEP = 9;             /* ~18s of polls: long enough to be robust,
+                                    short enough to follow a clock that steps */
+const SKEW_LOUD = 90;            /* past this, say so rather than quietly fix it */
+const SKEW_SAMPLES = [];
+const now = () => Date.now()/1000 + SKEW;
+
+function noteSkew(serverNow, t0, t1){
+  /* Sane unix seconds only. This is not paranoia about the server so much as
+     about the field itself: a payload that ever sends milliseconds here would
+     otherwise put the whole screen fifty years into the future, which is worse
+     than the drift it was meant to fix. */
+  if(!(Number.isFinite(serverNow) && serverNow > 1e9 && serverNow < 4e9)) return;
+  /* Sampled against the midpoint of the request rather than its end: the
+     server stamped the payload somewhere inside the round trip, so the
+     midpoint is wrong by at most half of it in either direction, where the end
+     is wrong by the whole return leg in one. */
+  SKEW_SAMPLES.push(serverNow - (t0 + t1) / 2);
+  if(SKEW_SAMPLES.length > SKEW_KEEP) SKEW_SAMPLES.shift();
+  /* Median, never the latest sample: one poll that queued behind a whisper
+     transcribe is seconds late and would yank every countdown on the screen.
+     A median ignores that and still follows a clock that genuinely steps,
+     within a handful of polls. */
+  const sorted = [...SKEW_SAMPLES].sort((a, b) => a - b);
+  SKEW = sorted[sorted.length >> 1];
 }
+
+/* Rounded, not truncated. Truncating is how 119 seconds came to read "1m ago"
+   on a screen whose only job is to say how old a thing is. */
+function ago(a){
+  a = Math.max(0, Math.round(a));
+  if(a < 60) return `${a}s ago`;
+  const m = Math.round(a/60);
+  if(m < 60) return `${m}m ago`;
+  const h = (m/60)|0, r = m%60;
+  return r ? `${h}h ${r}m ago` : `${h}h ago`;
+}
+const mmss = s => { s = Math.max(0, Math.round(s));
+  return s < 60 ? `${s}s` : `${(s/60)|0}:${two(s%60)}`; };
+
+/* Wall clock, 24-hour and fixed width, for the transcript rows only. The meta
+   clock stays in the reader's own 12/24 preference because it is a clock; the
+   tape is a log, and a log wants a column that lines up and a stamp that can
+   be checked against the scanner sitting next to it. No skew correction here
+   and none wanted: these render an absolute instant the server already fixed,
+   so they come out right whatever this device thinks the time is. */
+const hhmmss = ts => { const d = new Date(ts*1000);
+  return `${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}`; };
+const hhmm = ts => new Date(ts*1000)
+  .toLocaleTimeString([], {hour:'numeric', minute:'2-digit'});
+const offset = d => (d < 0 ? '-' : '+') + mmss(Math.abs(d));
+
+/* The six states a call moves through, mirrored from core so the two ends
+   agree on what "past arrival" means. Monotonic, clear last.
+
+   The two middle ones are the transport tail, and they exist because an EMS
+   call does not end at the scene: "Medic 16 has arrived at IU" used to read as
+   an arrival at the incident, so the wall said a confident "on scene · since
+   2:04" while the medic stood in an ER five miles away. Same class of lie as
+   the estimate that used to flip to "on scene" on its own. */
+const STATUS_LABEL = {dispatched:'dispatched', enroute:'en route',
+                      on_scene:'on scene', transporting:'transporting',
+                      at_hospital:'at hospital', clear:'cleared'};
+/* Never mapped onto a known state: a state this file has not been taught is
+   rendered as the word the server sent, underscores opened out. Guessing that
+   an unrecognised state is "dispatched" is how a transporting medic would come
+   to read as freshly dispatched, which is exactly the failure the whole status
+   mechanism exists to stop. */
+const stateWord = st => STATUS_LABEL[st] || esc(String(st).replace(/_/g, ' '));
+/* Only these two are before arrival; anything else, known or not, is not a
+   truck that is still coming towards you. */
+const PRE_ARRIVAL = new Set(['dispatched', 'enroute']);
+
+/* Which unit's state this is.
+
+   The honest hedge for the one-talkgroup ambiguity core documents: on a fire
+   where a medic transports one patient while the engine still works, the call's
+   state follows the medic, and an unattributed "at hospital" over a burning
+   building is false about the call even though it is true about the medic. So
+   where the transmission names the unit that was talking, the screen says which
+   unit it is talking about. Read out of status.text verbatim rather than mapped
+   onto a canonical designator -- if the radio said "Medic 16", that is what goes
+   on the wall, and a mapping that could be wrong never happens.
+
+   core only sets these states from a transmission that passed its self-report
+   test, so the unit named in one is the unit whose state it is. */
+const UNIT_SPOKEN = /\b(?:engine|medic|ambulance|ladder|truck|squad|rescue|tanker|brush|battalion|chief|unit)\s*-?\s*(\d{1,3})\b/i;
+const UNIT_SHORT  = /\b(?:BC|SQ|E|M|L|T|R|A|Q)-?\d{1,3}\b/;
+function unitOf(st){
+  const m = st && st.text && (UNIT_SPOKEN.exec(st.text) || UNIT_SHORT.exec(st.text));
+  return m ? esc(m[0].trim().replace(/\s+/g, ' ')
+                    .replace(/^\w/, c => c.toUpperCase())) + ' '
+           : '';
+}
+
+/* The ETA line, and the rule it now holds to: an estimate is worded as an
+   estimate, and only the radio can state a fact.
+
+   This is the fix for a real call. The estimate had the medic on scene at
+   +140s, so the line flipped to a flat "on scene"; at +152s the radio was
+   still Medic 16 calling en route. The screen was not slightly early, it was
+   asserting something it had no way to know. Now everything derived from
+   arithmetic reads "due ...", and the bare "on scene" is reserved for
+   call.status, which is derived from what a unit actually said out loud. */
+function etaText(call){
+  if(!call) return '';
+  const st = call.status || null, eta = call.eta || null;
+  const at = now();
+
+  /* Heard on the radio: the states allowed to read as plain statement, each
+     shown with the time it happened and, where the transmission named one, the
+     unit it happened to -- so it is a record of something rather than a
+     prediction about it, and a record of who rather than of "the call".
+
+     Past on_scene there is no scene countdown to show and none that would mean
+     anything: what has moved is where the unit is, not where the incident is,
+     and the incident's address is on screen above this line either way. */
+  const who = unitOf(st);
+  if(st && st.state === 'clear')
+    return `${who}cleared<span class="sub"> · ${hhmm(st.ts)}</span>`;
+  if(st && st.state && !PRE_ARRIVAL.has(st.state))
+    return `${who}${stateWord(st.state)}<span class="sub"> · since ${hhmm(st.ts)}</span>`;
+
+  /* En route is heard too, so it leads the line as fact -- and the server has
+     already re-based the estimate off that transmission, which is why the
+     countdown after it is worth more than the one before it. */
+  const lead = st && st.state === 'enroute'
+    ? `${who}en route<span class="sub"> · </span>` : '';
+  /* En route with no ETA at all still deserves the line: an unmapped address
+     is a reason to know less about where they are, not to say nothing. */
+  const bare = lead ? `${who}en route<span class="sub"> · since ${hhmm(st.ts)}</span>` : '';
+  if(!eta) return bare;
+
+  if(eta.passes_you && eta.pass_at != null){
+    const t = eta.pass_at - at;
+    const sub = eta.closest_metres!=null ? ` · ${eta.closest_metres} m away` : '';
+    return lead + (
+        t > 0   ? `<span class="approx">passes you in ~</span>${mmss(t)}`
+      : t > -90 ? `<span class="approx">due past you about now</span>`
+      :           `<span class="approx">should have passed you ~</span>${mmss(-t)
+                  }<span class="approx"> ago</span>`
+    ) + `<span class="sub">${sub}</span>`;
+  }
+
+  if(eta.scene_at == null) return bare;
+  const t = eta.scene_at - at;
+  const from = eta.station ? ` · ${eta.station}` : '';
+  /* Past the estimate with nothing heard, the honest thing is to say the
+     estimate ran out rather than to keep insisting they are about to arrive:
+     turnout runs 60-90s and varies call to call, so a minute and a half over
+     means the estimate is spent, not that the truck is at the kerb. */
+  return lead + (
+      t > 0   ? `<span class="approx">due on scene ~</span>${mmss(t)}`
+    : t > -90 ? `<span class="approx">due on scene now</span>`
+    :           `<span class="approx">due on scene · estimate ran out ~</span>${mmss(-t)
+                }<span class="approx"> ago</span>`
+  ) + `<span class="sub">${from}</span>`;
+}
+
+/* Tone colour is for the run that concerns you, and it stops concerning you
+   once the radio says they got there. */
+const isNear = call => {
+  if(!(call && call.eta && call.eta.passes_you)) return false;
+  const st = (call.status||{}).state;
+  /* No status at all is an older server and keeps today's behaviour. A state
+     this file does not know does not get the accent: the words on the line
+     still say what is known, and colour is never the only carrier here. */
+  return !st || PRE_ARRIVAL.has(st);
+};
 const catOf = t => CATEGORIES.find(c=>c.match.test(t||'')) || CATEGORIES.at(-1);
+
+/* What a call is called on screen, and the word "Dispatch" is not among the
+   answers. A live incident went up on the wall titled "Dispatch" with a
+   half-heard address under it, which is the display inventing a name for
+   something it failed to read. The address is a true thing about the call and
+   makes a better headline than a placeholder does; when there is not even one
+   of those, say what is actually known -- that the radio is busy -- and let
+   the department line below carry the rest. */
+function titleOf(call){
+  if(!call) return 'Radio traffic';
+  return call.type || call.address || 'Radio traffic';
+}
+
+/* The one-glance version of etaText for the calls that are not the headline:
+   where it has got to, and how long it has been running. Same rule -- every
+   word of it is something the radio said, never something arithmetic guessed. */
+function statusWord(call){
+  const st = (call && call.status) || {};
+  /* No status is the one honest default: it is how the call got on the screen.
+     Anything else the server says is rendered as itself. */
+  const state = st.state ? unitOf(st) + stateWord(st.state) : 'dispatched';
+  return call ? `${state} · ${ago(now() - callStart(call)).replace(' ago','')}`
+              : state;
+}
 
 /* ---------- painters: these rebuild the DOM, so they run only on change ---- */
 function metaRow(right){
   return `<div class="meta"><span id="fleft"></span>
-          <span class="right">${right||''}</span></div>`;
+          <span class="right">${right||''}<span class="skew" id="fskew"></span>
+          </span></div>`;
+}
+
+/* A correction of a couple of seconds is the network and is nobody's problem.
+   A correction of minutes means this device's own clock is wrong, and quietly
+   papering over that would hide a fault someone should go and fix -- so past
+   SKEW_LOUD the screen says so, in the corner next to the clock it is about. */
+function skewNote(){
+  if(Math.abs(SKEW) < SKEW_LOUD) return '';
+  return `this screen's clock is ${ago(Math.abs(SKEW)).replace(' ago','')} `
+       + `${SKEW > 0 ? 'slow' : 'fast'} · times shown are the server's`;
 }
 
 function paintCall(call){
@@ -248,16 +660,63 @@ function paintCall(call){
   document.documentElement.style.setProperty('--tone', c.tone);
   const units = (call.units||[]).map(u =>
     `<li class="${HOME_UNITS.test(u)?'home':''}">${esc(u)}</li>`).join('');
+  const city = call.city ? `<span class="city">${esc(call.city)}</span>` : '';
+  /* Three headlines in order of how much is actually known, and the address
+     promoted into the h1 is not then repeated beneath itself. */
+  const head = call.type
+    ? `<h1>${esc(call.type)}</h1>${call.address
+        ? `<p class="address">${esc(call.address)}${city}</p>` : ''}`
+    : call.address ? `<h1 class="place">${esc(call.address)}${city}</h1>`
+    :                `<h1 class="busy">Radio traffic</h1>`;
+  /* And the category label says which of the three this is, because a colour
+     nobody can name is not a signal. A call with no type has no category and
+     keeps the neutral tone -- it must never inherit the clay of a fire. */
+  const label = call.type ? c.label
+              : call.address ? 'type not read' : 'nothing parsed';
   el.innerHTML = `
-    <div class="call">
-      <h1>${esc(call.type||'Dispatch')}</h1>
-      ${call.address?`<p class="address">${esc(call.address)}${
-        call.city?`<span class="city">${esc(call.city)}</span>`:''}</p>`:''}
-      <p class="attrib">${esc(call.dept||'Dispatch')} <span class="cat">${c.label}</span></p>
-      ${call.eta?`<p class="eta${call.eta.passes_you?' near':''}" id="feta"></p>`:''}
+    <div class="call${(call.status||{}).state === 'clear' ? ' closed' : ''}">
+      ${head}
+      <p class="attrib">${esc(call.dept || 'Unknown department')} <span class="cat">${label}</span></p>
+      <p class="eta" id="feta"></p>
       ${units?`<ul class="units">${units}</ul>`:''}
     </div>
+    <div class="others" id="fothers"></div>
     ${metaRow('<span id="fclock"></span>')}`;
+  othersKey = null;            /* the container is new, so it needs filling */
+  paintOthers();
+}
+
+/* The other live calls, painted on their own key rather than with the
+   headline. Two reasons, both learned here: rebuilding #screen replays the
+   entrance animation, and a second call going en route is no reason to make
+   the structure fire above it flash; and the status ages tick every second,
+   which must never mean rebuilding anything. So structure is painted on
+   change, and the ages are text-only in tick(), same rule as the clock. */
+let othersKey = null;
+function paintOthers(){
+  const box = document.getElementById('fothers');
+  if(!box) return;
+  const rest = calls.filter(c => !current || c.id !== current.id);
+  const key = rest.map(c => `${c.id}:${(c.status||{}).state||''}`).join(',');
+  if(key === othersKey) return;
+  othersKey = key;
+  box.innerHTML = !rest.length ? '' : `
+    <p class="count">${rest.length === 1 ? '1 more call running'
+                                         : rest.length + ' more calls running'}</p>
+    <ul>${rest.map(o => {
+      const oc = catOf(o.type);
+      /* Titled by its address, so the address does not go in the second slot
+         as well -- that leaves the department, which is what the slot is for. */
+      const rest = o.type ? [o.address, o.dept] : [o.dept];
+      return `<li class="${[(o.status||{}).state === 'clear' ? 'closed' : '',
+                            o.type ? '' : 'place'].filter(Boolean).join(' ')}"
+                  style="--tone:${oc.tone}">
+        <button type="button" data-call="${esc(o.id)}">
+          <span class="otype">${esc(titleOf(o))}</span>
+          <span class="oaddr">${esc(rest.filter(Boolean).join(' · '))}</span>
+          <span class="ostat" data-id="${esc(o.id)}">${esc(statusWord(o))}</span>
+        </button></li>`;
+    }).join('')}</ul>`;
 }
 
 function paintIdle(){
@@ -295,20 +754,57 @@ function paintError(info){
     ${metaRow('<span id="fclock"></span>')}`;
 }
 
+/* Three different instants get called "the call", and mixing them up is what
+   put a wrong age on the screen and a wrong +Xs on every transcript row:
+
+     callStart()  when this conversation began -- the dispatch tones. What a
+                  person means by "that fire is eight minutes old". Emphatically
+                  not current.ts, which is the timestamp of whichever
+                  transmission last re-parsed as a dispatch: chatter mentioning
+                  the fire replaces the call server-side, and the age readout
+                  would jump back to 0s in the middle of a working structure fire.
+     lastHeard()  the most recent transmission. What "stale" should mean: the
+                  radio has gone quiet, not the call has been on screen a while.
+                  A call still being worked stays lit.
+     call.ts      the parse that is currently on screen. Fine for nothing here
+                  except a fallback when the server is older than these fields.
+
+   Both take a call rather than reading the one on screen, because there are
+   now several and a second call must not be able to age the first. */
+function callStart(call){
+  if(!call) return now();
+  return call.radio_dispatch_ts ?? call.radio_start ?? call.ts;
+}
+function lastHeard(call){
+  if(!call) return 0;
+  const rows = call.radio || [];
+  return Math.max(call.ts || 0, rows.length ? rows[rows.length-1].ts : 0);
+}
+
 /* ---------- tick: text and widths only, never innerHTML ------------------- */
 function tick(){
   const clock = document.getElementById('fclock');
+  /* The corrected clock, not the device's: this is the one time on the screen
+     a passer-by is most likely to trust and least likely to check. */
   if(clock) clock.textContent =
-    new Date().toLocaleTimeString([], {hour:'numeric', minute:'2-digit'});
+    new Date(now()*1000).toLocaleTimeString([], {hour:'numeric', minute:'2-digit'});
+  const skew = document.getElementById('fskew');
+  if(skew) skew.textContent = skewNote();
   const left = document.getElementById('fleft');
   if(!left) return;
   if(mode === 'call' && current){
     const eta = document.getElementById('feta');
-    if(eta) eta.innerHTML = etaText(current.eta);
-    const age = Math.max(0, Date.now()/1000 - current.ts);
-    bar.style.width = (100 - Math.min(100, age/FADE_AFTER*100)) + '%';
-    el.classList.toggle('stale', age > FADE_AFTER);
-    left.textContent = ago(age);
+    if(eta){
+      eta.innerHTML = etaText(current);
+      eta.classList.toggle('near', isNear(current));
+    }
+    const quiet = Math.max(0, now() - lastHeard(current));
+    bar.style.width = (100 - Math.min(100, quiet/FADE_AFTER*100)) + '%';
+    el.classList.toggle('stale', quiet > FADE_AFTER);
+    left.textContent = ago(now() - callStart(current));
+    /* Text only, per the rule above: the list itself is painted on change. */
+    for(const s of document.querySelectorAll('#fothers .ostat'))
+      s.textContent = statusWord(calls.find(c => c.id === s.dataset.id));
   } else {
     el.classList.remove('stale');
     left.textContent = mode === 'error' ? 'source down'
@@ -316,13 +812,49 @@ function tick(){
   }
 }
 
+/* Focus, and the one rule that matters: it goes back to the newest dispatch on
+   its own. A screen nobody is standing at must not sit on the call somebody
+   pressed C to look at four minutes ago. */
+function applyFocus(){
+  /* Raw clock, not the corrected one: both ends of this are measured here, and
+     a skew correction landing mid-look must not expire someone's focus. */
+  const held = focusId && Date.now()/1000 < focusUntil
+               && calls.some(c => c.id === focusId);
+  if(!held) focusId = null;
+  const next = calls.find(c => c.id === focusId) || calls[0] || null;
+  const moved = (next && next.id) !== (current && current.id);
+  current = next;
+  return moved;
+}
+
+function focusCall(id){
+  if(!calls.some(c => c.id === id)) return;
+  focusId = id;
+  focusUntil = Date.now()/1000 + FOCUS_HOLD;
+  applyFocus(); showFocusedTape(); render();
+}
+
+/* Step through the running calls; wraps, so it is one key rather than two. */
+function cycleFocus(step){
+  if(calls.length < 2) return;
+  const at = calls.findIndex(c => c.id === (current && current.id));
+  focusCall(calls[((at < 0 ? 0 : at) + step + calls.length) % calls.length].id);
+}
+
 /* ---------- one entry point decides which state is on screen -------------- */
 function render(){
   let key;
+  /* Here as well as in poll(), so an unattended focus lapses back to the
+     newest call on the second, without waiting for the next payload. */
+  if(calls.length && applyFocus()) showFocusedTape();
   if(mode === 'boot')       key = 'boot';
   else if(mode === 'error') key = 'error:' + lastError;
-  else if(current && (Date.now()/1000 - current.ts) <= FADE_AFTER*1.5)
-                            key = `call|${current.dept}|${current.type}|${current.address}|${current.ts}`;
+  /* Keyed on the call's id and when it started, not on the parse that is on
+     screen: a later transmission that re-parses as the same dispatch is the
+     same call, and rebuilding the DOM for it would replay the entrance
+     animation and restart every age on the screen. */
+  else if(current)          key = `call|${current.id}|${titleOf(current)}|${
+                                  current.address}|${Math.round(callStart(current))}`;
   else { mode = 'idle';     key = 'idle'; }
 
   if(key !== painted){
@@ -332,6 +864,7 @@ function render(){
     else if(key === 'idle') paintIdle();
     else { mode = 'call'; paintCall(current); }
   }
+  paintOthers();
   tick();
 }
 
@@ -349,22 +882,699 @@ function errorInfo(){
 
 setInterval(() => render(), 1000);
 
-/* ---------- data ---------------------------------------------------------- */
+/* ---------------------------------------------------------------------------
+   Radio: the transcript, and the audio it came from.
+
+   Both halves are opt-out, and they are two switches rather than one because
+   they fail in opposite directions. The transcript is silent and can sit on a
+   hallway screen all day; the audio cannot, and there are rooms where a radio
+   playing itself at 3am is the reason the whole thing gets unplugged. Held in
+   localStorage so a screen that reboots comes back the way it was left.
+
+   Nothing here re-fetches audio from the source: the clip is the one the
+   poller already downloaded, handed over by the server from memory. On
+   Broadcastify that matters -- reads are billed, and replaying a call by
+   asking for it again would pay for it twice.
+
+   Kiosk setup, and the one thing worth knowing before mounting this screen:
+   browsers refuse to make noise until the page has been touched, so a screen
+   nobody ever touches is a screen that never plays anything. The audio switch
+   being on is treated here as standing permission -- any stray gesture takes
+   it, and every arriving transmission is a fresh attempt -- but the durable
+   fix is on the browser side:
+
+     Chrome, once:   padlock -> Site settings -> Sound -> Allow
+                     (or chrome://settings/content/sound)
+     Chrome, kiosk:  chromium --kiosk --autoplay-policy=no-user-gesture-required
+
+   With neither of those, the bar says so and the audio chip goes clay, because
+   a silent screen is otherwise indistinguishable from a quiet radio.
+   --------------------------------------------------------------------------- */
+const au    = document.getElementById('au');
+const radio = document.getElementById('radio');
+const tapeEl= document.getElementById('tape');
+const playBtn=document.getElementById('play');
+const seekEl= document.getElementById('seek');
+const seekIn= seekEl.querySelector('i');
+const rtime = document.getElementById('rtime');
+const rwho  = document.getElementById('rwho');
+const liveBtn=document.getElementById('golive');
+const tapeBtn=document.getElementById('t-tape');
+const autoBtn=document.getElementById('t-auto');
+
+const pref = (k, d) => { try{ const v = localStorage.getItem(k);
+                              return v === null ? d : v === '1'; }catch(e){ return d } };
+const setPref = (k, v) => { try{ localStorage.setItem(k, v ? '1' : '0') }catch(e){} };
+
+let showTape = pref('firewall.transcript', true);
+let autoPlay = pref('firewall.audio', true);
+
+let tape = [], known = new Set(), queue = [], sel = null;
+let radioMeta = {};      /* radio_start / radio_dispatch_ts for the conversation */
+let primed = false;      /* the first payload is history, not news */
+let blocked = false;     /* the browser has not let this page make a sound yet */
+let gone = false;        /* the clip rolled off the server's tape */
+let retrying = false;    /* an unblock attempt is already in flight */
+let pending = null;      /* the clip the policy refused, waiting for a chance */
+
+/* The bar has two states and used to have one, which is the whole of the
+   third complaint: clicking a line from four minutes ago dropped you into the
+   past with nothing saying so and no way back, while the arrivals you had
+   come here to hear were trimmed off the end of the queue behind you.
+     FOLLOWING  new transmissions play as they arrive. The default, and where
+                everything returns to on its own.
+     REPLAYING  you clicked an earlier line. Arrivals stop playing themselves
+                and start stacking up, counted in the bar, and the clip you
+                are on gets to finish before the radio takes the room back. */
+let follow = true;
+let userPaused = false;  /* an explicit pause outranks anything arriving */
+
+/* Following, the queue is a hand-off between one clip and the next and should
+   never become a backlog to dump on the room. Replaying or paused, the queue
+   IS the backlog, and throwing it away is exactly the bug: "do not stack up an
+   hour of radio" is a rule about a screen left alone, not about one where
+   somebody just deliberately pressed pause and is standing there listening. */
+const QUEUE_FOLLOW = 4, QUEUE_HELD = 24;
+const queueCap = () => (follow && !userPaused) ? QUEUE_FOLLOW : QUEUE_HELD;
+
+const clock = t => Number.isFinite(t)
+  ? `${(t/60)|0}:${String(Math.floor(t%60)).padStart(2,'0')}` : '0:00';
+
+/* ---------------------------------------------------------------------------
+   Which part of the loaded record the row being played actually is.
+
+   A Broadcastify record is one trunked channel grant, and a grant can hold
+   more than one keyup. "Dispatch 16, that is a negative." and the "Clear,
+   thank you." answering it came down as a single mp3, and this screen put both
+   voices on one line under one timestamp, as though one person had said all of
+   it. The server splits them now: one row per keyup, every row pointing at the
+   same untouched record with its own range on the url. The bytes were paid for
+   once and downloaded once, and "seconds 3.17 to 4.77 of that file" is a
+   complete description of the second voice.
+
+   `cue` is that range for whatever is currently loaded. Null means the row IS
+   the record -- the overwhelmingly common case, and the only thing an older
+   server can send -- and every readout below then falls back to the whole
+   element and behaves exactly as it did before any of this existed.
+   --------------------------------------------------------------------------- */
+let cue = null;                  /* {start,end} in record seconds, or null */
+
+/* Both numbers or neither. Half a range is not a range, and inventing the
+   missing half would seek somewhere nobody asked for. */
+const rangeOf = t => t && Number.isFinite(t.play_start) && Number.isFinite(t.play_end)
+                  && t.play_end > t.play_start
+                   ? {start:t.play_start, end:t.play_end} : null;
+
+const cueStart = () => cue ? cue.start : 0;
+const cueEnd   = () => cue ? cue.end   : au.duration;
+/* The keyup's own length, not the record's, and this is one of the two
+   readouts that were wrong. "Clear, thank you" is 1.6 seconds of a 4.8-second
+   grant: it read 0:03 / 0:04 the instant it started and 0:04 / 0:04 when it
+   finished, a bar that begins two thirds along and crosses a third of the
+   screen, because it was timing a recording rather than the voice in it. On a
+   fragment this needs no metadata at all -- both numbers came off the wire --
+   so it is right before the audio has finished loading. */
+const cueLen = () => cueEnd() - cueStart();
+/* Elapsed within the keyup. A fragment row's currentTime starts at play_start
+   rather than at zero, so every position on this bar was offset by it. */
+const cuePos = () => Math.max(0, Math.min(cueLen(), au.currentTime - cueStart()));
+/* Whether any of THIS transmission is left. Deliberately not
+   currentTime < duration: on a fragment that stays true for the whole rest of
+   the record, and resuming on it plays the next speaker's keyup. */
+const cueLeft = () => cueEnd() - au.currentTime > 0.05;
+
+/* The one place a clip is handed to the element, so the range and the source
+   can never drift apart. Two rows off one grant are two different strings --
+   same query, different #t= -- so the element reloads and seeks, and the
+   browser answers the second one out of the blob it already has: it strips the
+   fragment, the server sees the same /api/clip?id= and replies 206. */
+function loadRow(t){
+  cue = rangeOf(t);
+  au.src = t.url;
+}
+
+function paintTape(){
+  /* Offsets run from the dispatch that started this conversation, which is
+     what "+90s into the call" means to anyone reading it. tape[0] is only the
+     oldest row that still fit in the server's window: on a call that outruns
+     the row cap it slides forward, and every offset measured from it re-bases
+     silently and reads minutes short. radio_dispatch_ts is the real zero, and
+     a row said before the dispatch is allowed to show a negative offset rather
+     than being clamped to a +0s that is not true. */
+  const t0 = radioMeta.dispatch ?? radioMeta.start
+             ?? (tape.length ? tape[0].ts : 0);
+  tapeEl.innerHTML = tape.map(t => `
+    <li class="${t.dispatch?'dispatch':''}"${t.id===sel?' aria-current="true"':''}>
+      <button type="button" data-id="${esc(t.id)}"${t.url?'':' disabled'}>
+        <span class="at">${hhmmss(t.ts)}</span>
+        <span class="off">${offset(t.ts - t0)}</span>
+        <span class="said">${esc(t.text || '(no speech)')}</span>
+      </button></li>`).join('');
+  /* Following means the newest line; replaying means the line you clicked, so
+     do not scroll the list out from under someone reading back through it. */
+  if(follow) tapeEl.scrollTop = tapeEl.scrollHeight;
+  radio.hidden = !showTape || !tape.length;
+  paintBar();
+  measure();
+}
+
+/* The clip being played need not be on the tape you are looking at: audio
+   follows the radio, and the radio does not care which call has the headline.
+   So rows are looked up across every live call, and the bar says whose. */
+const allRows = () => calls.flatMap(c => c.radio || []);
+const findRow = id => allRows().find(r => r.id === id) || tape.find(r => r.id === id);
+const callOfRow = id => calls.find(c => (c.radio||[]).some(r => r.id === id));
+
+/* Two rows off one grant are two transmissions and are never drawn as one:
+   that is the entire point of the split, and drawing them as one is the
+   complaint that produced it. But while one of them is playing it is worth
+   saying where in the recording you are, because two wall clocks a second
+   apart on the tape above are otherwise the only hint that the radio changed
+   hands inside a single channel grant. Said in the bar, which is about the
+   clip, rather than in the list, which is about the transmissions -- the list
+   stays one line per voice with nothing tying them together, because looking
+   tied together is the whole of what was wrong. Numbers only: nothing off the
+   wire goes into that innerHTML. */
+function grantNote(cur){
+  if(!cur || !rangeOf(cur) || cur.clip == null) return '';
+  const rows = allRows();
+  const kin = (rows.length ? rows : tape).filter(r => r.clip === cur.clip);
+  const at = kin.findIndex(r => r.id === cur.id);
+  return kin.length > 1 && at >= 0
+       ? ` · ${at + 1} of ${kin.length} in one recording` : '';
+}
+
+function paintBar(){
+  const playable = tape.some(t => t.url);
+  const cur = findRow(sel);
+  const part = grantNote(cur);
+  const from = callOfRow(sel);
+  const elsewhere = from && current && from.id !== current.id;
+  /* Not named `live`: that is the poller's word for "the API answered", and
+     the two are unrelated. */
+  const playing = !au.paused && !au.ended && au.currentSrc;
+  playBtn.disabled = !playable;
+  playBtn.textContent = playing ? '❙❙' : '▶';
+  playBtn.setAttribute('aria-label', playing ? 'Pause' : 'Play');
+  paintTime();
+  liveBtn.hidden = follow;
+  liveBtn.textContent = queue.length ? `▸ live · ${queue.length} waiting` : '▸ live';
+  autoBtn.classList.toggle('blocked', autoPlay && blocked);
+  rwho.className = 'who' + (blocked || gone ? ' warn' : '') + (blocked ? ' note' : '');
+  /* Every one of these says what to do about it, rather than just reporting
+     that something is off. A muted screen that never explains itself reads
+     as broken. Static strings only -- nothing from the wire goes in here. */
+  rwho.innerHTML =
+      blocked  ? 'sound is on, but this browser has not allowed it yet — touch '
+               + 'the screen or press any key and it starts.'
+               + '<span class="hint">to keep it on: padlock → Site settings → '
+               + 'Sound → Allow (chrome://settings/content/sound), or launch '
+               + 'with --autoplay-policy=no-user-gesture-required</span>'
+    : gone     ? 'that clip is no longer held'
+    : !playable? 'no audio kept for this call'
+    /* Said here as well, and this is the moment it matters most: clicking the
+       second of two lines a second apart is exactly when a listener wonders
+       whether they are hearing the same clip twice. With no grant to name,
+       `part` is empty and both strings are the ones that were always here. */
+    : !follow  ? (queue.length
+                    ? `replaying${part} · ${queue.length} waiting — press L for live`
+                    : `replaying${part || ' an earlier transmission'} — press L for live`)
+    : userPaused && au.currentSrc
+               ? (queue.length ? `paused · ${queue.length} waiting — press space to carry on`
+                               : 'paused — press space to carry on')
+    /* With two calls running, a voice with no name on it is worse than
+       silence: you cannot tell whether the fire or the medical run is the one
+       being talked about. So the clip is attributed whenever there is any
+       ambiguity to resolve, and says how to go and look at it. */
+    : cur && elsewhere ? `${esc(titleOf(from))} · ${esc(from.dept)} — press C to bring it up`
+    : cur && calls.length > 1
+               ? `${cur.dispatch ? 'dispatch' : 'radio traffic'} · ${esc(titleOf(current))}${part}`
+    : cur      ? (cur.dispatch ? 'dispatch' : 'radio traffic') + part
+    : autoPlay ? 'plays as it arrives' : 'press space to play';
+}
+
+/* `replaying` is what separates a click on an old line from the bar playing
+   the next arrival itself. Only the first one drops you into the past. */
+function play(id, replaying){
+  const t = findRow(id);
+  if(!t || !t.url) return;
+  if(replaying) follow = false;
+  sel = id; gone = false; userPaused = false; pending = id;
+  loadRow(t);
+  au.play().then(() => { blocked = false; pending = null; paintTape(); })
+           .catch(nope);
+  paintTape();
+}
+
+/* Two different failures wearing the same rejected promise. NotAllowedError is
+   the autoplay policy, which is not the clip's fault and not permanent -- the
+   clip goes back on the front of the queue so the next gesture, or the next
+   transmission, plays it rather than losing it. Anything else means the audio
+   itself did not load, which no amount of retrying fixes. */
+function nope(err){
+  if(err && err.name === 'NotAllowedError'){
+    blocked = true;
+    if(pending && queue[0] !== pending) queue.unshift(pending);
+    armGesture();
+  } else gone = true;
+  paintTape();
+}
+
+/* Any gesture at all is taken as permission, not just the space bar: this is a
+   screen in a hallway, and the person who walks up to it and touches it should
+   get sound without being told there is a keyboard shortcut for it. One-shot
+   listeners, re-armed by nope() for as long as the policy keeps refusing. */
+const GESTURES = ['pointerdown','click','keydown','touchstart','mousemove'];
+let armed = false;
+function armGesture(){
+  if(armed) return;
+  armed = true;
+  const take = () => {
+    armed = false;
+    for(const ev of GESTURES) removeEventListener(ev, take, true);
+    if(blocked) retryBlocked();
+  };
+  for(const ev of GESTURES) addEventListener(ev, take, {capture:true, once:true});
+}
+
+/* Retry the clip the policy refused. Guarded twice. Once because a single tap
+   can arrive as both pointerdown and click, and calling play() twice on one
+   element rejects the first promise with AbortError -- which nope() would file
+   as a dead clip and say so, which is a lie. Once on time, because mousemove
+   is in the gesture list above and no browser counts it as user activation:
+   without a throttle, walking a mouse across the screen would fire a rejected
+   play() sixty times a second forever. */
+let lastTry = 0;
+function retryBlocked(){
+  if(!blocked || retrying) return;
+  if(Date.now() - lastTry < 1500){ armGesture(); return; }
+  lastTry = Date.now();
+  const id = pending ?? queue[0] ?? [...tape].reverse().find(t => t.url)?.id;
+  const t = findRow(id);
+  if(!t || !t.url) return;
+  retrying = true;
+  sel = id;
+  loadRow(t);
+  au.play().then(() => { blocked = false; pending = null; retrying = false;
+                         if(queue[0] === id) queue.shift();
+                         paintTape(); })
+           .catch(err => { retrying = false; nope(err); });
+}
+
+/* One transmission at a time, in the order it was said: a call is a
+   conversation, and two of it at once is noise. */
+function pump(){
+  /* The two things that outrank an arrival: someone is listening to the past,
+     and someone pressed pause. Neither is a state the radio may talk over. */
+  if(!follow || userPaused) return;
+  if(!au.paused && !au.ended && au.currentSrc) return;
+  /* Skip rather than stall: a queued clip can belong to a call that has since
+     dropped off the list, and the arrivals behind it are still worth hearing. */
+  while(queue.length){
+    const id = queue.shift(), t = findRow(id);
+    if(t && t.url) return play(id, false);
+  }
+}
+
+/* The transcript on screen belongs to the call in focus, and so do its
+   offsets: every call carries its own radio_dispatch_ts, and timing one call's
+   rows against another's dispatch is exactly the class of mistake that put a
+   wrong +Xs on this screen in the first place. */
+function showFocusedTape(){
+  const list = (current && current.radio) || [];
+  radioMeta = current ? {start:current.radio_start,
+                         dispatch:current.radio_dispatch_ts} : {};
+  const same = list.length === tape.length && list.every((t,i) => t.id === tape[i].id);
+  tape = list;
+  if(!same) paintTape(); else paintBar();
+}
+
+/* Arrivals, across every running call rather than only the focused one --
+   turning your head towards the fire is not a reason to stop hearing the
+   medical run. Ordered by when it was said, so two calls interleave the way
+   they actually came over the air. */
+function radioSync(){
+  showFocusedTape();
+  const rows = allRows().filter(r => r.url);
+  const fresh = rows.filter(r => !known.has(r.id)).sort((a,b) => a.ts - b.ts);
+  rows.forEach(r => known.add(r.id));
+  /* Ids only ever move forward, so anything not on a live call's tape can
+     never come back. Prune rather than remember every transmission of the
+     month. */
+  if(known.size > 400) known = new Set(rows.map(r => r.id));
+  if(!primed){ primed = true; return; }         /* opened mid-call: stay quiet */
+  if(!autoPlay) return;
+  const at = now();
+  /* Only what was said in the last few minutes. Reconnecting after an outage
+     should not replay an hour of radio into the room. */
+  for(const r of fresh) if(at - r.ts < 180) queue.push(r.id);
+  queue = queue.slice(-queueCap());
+  /* An arrival while blocked is another chance at the policy rather than a
+     reason to stop trying: Chrome promotes a site to autoplay-allowed once its
+     media engagement score is high enough, and a kiosk profile that played
+     sound yesterday starts today already allowed. Giving up on the first
+     refusal is how a screen ends up silent for the rest of the day. */
+  if(blocked) retryBlocked(); else pump();
+  paintBar();
+}
+
+/* Back to the present. Whatever stacked up while you were reading back plays
+   in the order it was said, oldest first, because that is the conversation. */
+function goLive(){
+  if(follow) return;
+  follow = true; userPaused = false;
+  au.pause();          /* the point of the control is to leave the past now */
+  if(blocked) retryBlocked(); else pump();
+  paintTape();
+}
+
+function toggle(which, on){
+  if(which === 'tape'){
+    showTape = on; setPref('firewall.transcript', on);
+    tapeBtn.setAttribute('aria-pressed', String(on));
+  } else {
+    autoPlay = on; setPref('firewall.audio', on);
+    autoBtn.setAttribute('aria-pressed', String(on));
+    /* Turning audio off means off now, not after this transmission. */
+    if(!on){ queue = []; pending = null; au.pause(); }
+    /* And turning it back on is a click, which is the gesture the policy has
+       been waiting for -- so take it rather than making them find another. */
+    if(on && blocked) retryBlocked();
+  }
+  paintTape();
+}
+
+function playPause(){
+  /* Space at a blocked page means "yes, make noise": that is the same request
+     as any other gesture, and it goes down the same path. */
+  if(blocked) return retryBlocked();
+  if(!au.paused && !au.ended && au.currentSrc){
+    /* A deliberate pause, and it outranks everything arriving afterwards --
+       pump() must never take the room back on someone who asked for quiet. */
+    userPaused = true; au.pause(); return paintBar();
+  }
+  /* Is there more of this transmission, not is there more of this file: a
+     fragment row stopped at the end of its keyup still has most of the record
+     ahead of it, and carrying on into that is playing the next speaker on
+     demand. Spent, it falls through to the newest clip, which is what a
+     finished whole-record clip has always done. */
+  if(au.currentSrc && cueLeft()){
+    userPaused = false;
+    au.play().then(() => { blocked = false; paintBar(); }).catch(nope);
+    return;
+  }
+  const t = [...tape].reverse().find(x => x.url);   /* newest with audio */
+  if(t) play(t.id, false);
+}
+
+/* The bar is only as tall as its content, and its content changes. Measure
+   rather than guess: a hard-coded reserve is wrong the moment a transcript
+   line wraps. */
+function measure(){
+  document.documentElement.style.setProperty(
+    '--radio-h', radio.hidden ? '0px' : radio.offsetHeight + 'px');
+}
+if(window.ResizeObserver) new ResizeObserver(measure).observe(radio);
+addEventListener('resize', measure);
+
+/* Clicking a line is the one way into the past, and the only place `replaying`
+   is ever true. */
+tapeEl.addEventListener('click', e => {
+  const b = e.target.closest('button[data-id]');
+  if(b) play(b.dataset.id, true);
+});
+/* The secondary list is clickable as well as keyed: a screen with a mouse
+   plugged into it should not need the shortcut to be discovered first. */
+el.addEventListener('click', e => {
+  const b = e.target.closest && e.target.closest('button[data-call]');
+  if(b) focusCall(b.dataset.call);
+});
+playBtn.addEventListener('click', playPause);
+liveBtn.addEventListener('click', goLive);
+seekEl.addEventListener('click', e => {
+  if(!Number.isFinite(au.duration)) return;
+  /* The bar is the keyup, not the record: a click halfway along it lands
+     halfway through the thing you can hear, rather than halfway through a
+     recording most of which belongs to somebody else. */
+  const len = cueLen();
+  if(!Number.isFinite(len) || !len) return;
+  const r = seekEl.getBoundingClientRect();
+  au.currentTime = cueStart()
+    + Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)) * len;
+});
+
+/* The readout and the bar, in the keyup's own frame. Split out because two
+   things now need it -- the ticking during playback and paintBar, which has to
+   show a fragment's length correctly the moment it is selected, before any
+   metadata has arrived. */
+function paintTime(){
+  const len = cueLen();
+  seekIn.style.width = Number.isFinite(len) && len
+    ? (cuePos() / len * 100) + '%' : '0';
+  rtime.textContent = `${clock(cuePos())} / ${clock(len)}`;
+}
+
+/* A transmission ending, however it ended: the element ran out of record, or we
+   stopped it at the end of its keyup. A replay ends by rejoining the radio --
+   nobody wants to be left in the past by a clip finishing, and this is what
+   makes "listening as they come in" resume on its own: the backlog that
+   stacked up behind you plays next, in order. */
+function finish(){
+  const wasReplay = !follow;
+  follow = true;
+  if(wasReplay) paintTape(); else paintBar();
+  pump();
+}
+
+au.addEventListener('timeupdate', () => {
+  /* The end of a keyup is enforced here rather than left to the media
+     fragment. Browsers honour the start of a #t= range and cannot be relied on
+     to stop at its end, and an overrun is not a cosmetic fault: it is the next
+     speaker played on top of this one, which is precisely the "two
+     transmissions grouped as one" this whole mechanism exists to undo.
+
+     timeupdate is coarse -- about four a second -- and that is fine here. The
+     server pads each keyup by 0.25s and clamps it against the neighbouring
+     one, and a split only happens across a gap of at least 0.8s, so a quarter
+     second of overrun lands in the silence between two people, never in a
+     voice. Only while actually playing: a seek fires timeupdate too, and
+     clicking the end of the bar on a paused clip must not launch the next. */
+  if(cue && !au.paused && au.currentTime >= cue.end){
+    au.pause();
+    /* Park it exactly on the boundary, so the readout reads the keyup's length
+       rather than a fifth of a second more than it. */
+    if(au.currentTime > cue.end) au.currentTime = cue.end;
+    return finish();
+  }
+  paintTime();
+});
+/* The other half of the range. The url carries #t=play_start,play_end and the
+   browser should already have seeked there, but doing it again costs one seek
+   inside a file it has just cached and means the row plays its own keyup even
+   on an engine that ignored the fragment -- the difference between hearing the
+   answer and hearing the question a second time. */
+au.addEventListener('loadedmetadata', () => {
+  if(cue && Math.abs(au.currentTime - cue.start) > 0.05) au.currentTime = cue.start;
+  paintBar();
+});
+au.addEventListener('ended', finish);
+au.addEventListener('play',  paintBar);
+au.addEventListener('pause', paintBar);
+/* A clip can age out of the server's memory while it is still listed. Say so
+   in the bar rather than sitting there apparently playing nothing -- and while
+   replaying, stop there: rolling straight on to the queued arrivals would wipe
+   the message off the bar before it had been read. */
+au.addEventListener('error', () => { gone = true; paintBar(); if(follow) pump(); });
+
+tapeBtn.addEventListener('click', () => toggle('tape', !showTape));
+autoBtn.addEventListener('click', () => toggle('auto', !autoPlay));
+tapeBtn.setAttribute('aria-pressed', String(showTape));
+autoBtn.setAttribute('aria-pressed', String(autoPlay));
+
+/* Cursor and chips come back when a mouse moves and leave again when it
+   stops: this is a screen you look at, not one you sit at. */
+let idle;
+addEventListener('mousemove', () => {
+  document.body.classList.add('pointer');
+  clearTimeout(idle);
+  idle = setTimeout(() => document.body.classList.remove('pointer'), 2500);
+});
+
+/* ---------- data ----------------------------------------------------------
+   The demo carries its ETAs and statuses as offsets in seconds from the moment
+   you press space, not as instants, because the demo call is stamped then. It
+   is worth the few lines: without them the file:// copy never renders the ETA
+   line at all, and the ETA line is the half of this screen most likely to say
+   something it cannot back up. One entry per state it can be in. */
 const DEMO = [
-  {dept:'West Lafayette FD', type:'Structure Fire',        address:'340 Sagamore Parkway West', city:'West Lafayette', units:['E2','E3','L1','BC1']},
-  {dept:'Purdue FD',         type:'Medical: Chest Pain',   address:'Cary Quadrangle',           city:'Purdue campus',  units:['M2','E11']},
-  {dept:'West Lafayette FD', type:'Vehicle Crash',         address:'US-231 at Airport Road',    city:'West Lafayette', units:['E2','M2','L1']},
-  {dept:'Purdue FD',         type:'Automatic Fire Alarm',  address:'Wetherill Laboratory',      city:'Purdue campus',  units:['E11']},
-  {dept:'Tippecanoe County Fire', type:'Carbon Monoxide Alarm', address:'1820 Cumberland Avenue', city:'West Lafayette', units:['E3']},
+  {dept:'West Lafayette FD', type:'Structure Fire',        address:'340 Sagamore Parkway West', city:'West Lafayette', units:['E2','E3','L1','BC1'],
+   eta:{scene:170, station:'WLFD Station 2'},
+   transcript:'Engine 2, Engine 3, Ladder 1, Battalion 1, respond to 340 Sagamore Parkway West for a reported structure fire, smoke showing from the second floor.'},
+  {dept:'Purdue FD',         type:'Medical: Chest Pain',   address:'Cary Quadrangle',           city:'Purdue campus',  units:['M2','E11'],
+   eta:{scene:95, station:'Purdue FD', pass:35, near:210},
+   status:{state:'enroute', at:-40, text:'Medic 2 en route'},
+   transcript:'Medic 2, Engine 11, respond to Cary Quadrangle for a 60 year old male, chest pain, conscious and breathing.'},
+  {dept:'West Lafayette FD', type:'Vehicle Crash',         address:'US-231 at Airport Road',    city:'West Lafayette', units:['E2','M2','L1'],
+   eta:{scene:-15, station:'WLFD Station 3'},
+   transcript:'Engine 2, Medic 2, Ladder 1, respond to US-231 at Airport Road, two vehicle personal injury accident, one party still in the vehicle.'},
+  {dept:'Purdue FD',         type:'Automatic Fire Alarm',  address:'Wetherill Laboratory',      city:'Purdue campus',  units:['E11'],
+   eta:{scene:-200, station:'Purdue FD'},
+   transcript:'Engine 11, respond to Wetherill Laboratory for an automatic fire alarm activation, third floor pull station.'},
+  {dept:'Tippecanoe County Fire', type:'Carbon Monoxide Alarm', address:'1820 Cumberland Avenue', city:'West Lafayette', units:['E3'],
+   eta:{scene:-90, station:'WLFD Station 1'},
+   status:{state:'on_scene', at:-70, text:'Engine 3 on scene'},
+   transcript:'Engine 3, respond to 1820 Cumberland Avenue for a carbon monoxide alarm activation, no one reporting symptoms.'},
+  /* The EMS transport tail, which is where a call actually ends. "Medic 16 is
+     going to be en route to IU" is the medic leaving the scene with a patient,
+     and the state is attributed to the unit that said it. */
+  {dept:'Purdue FD', type:'Medical: Chest Pain', address:'Cary Quadrangle', city:'Purdue campus', units:['M16','E11'],
+   started:410, eta:{scene:150, station:'Purdue FD'},
+   status:{state:'transporting', at:350, text:'Dispatch, Medic 16 is going to be en route to IU.'},
+   transcript:'Medic 16, Engine 11, respond to Cary Quadrangle for a 60 year old male, chest pain, conscious and breathing.'},
+  /* And "Medic 16 has arrived at IU" -- the transmission that used to put a
+     confident "on scene" on the wall while the medic was in an ER across town. */
+  {dept:'Purdue FD', type:'Medical: Fall', address:'Earhart Hall', city:'Purdue campus', units:['M16'],
+   started:520, eta:{scene:140, station:'Purdue FD'},
+   status:{state:'at_hospital', at:430, text:'Dispatch, Medic 16 has arrived at IU.'},
+   transcript:'Medic 16, respond to Earhart Hall for a fall victim, conscious and breathing.'},
+  /* The parser heard where and not what: no type, so the address takes the
+     headline. This state exists in the demo because it is the one that used to
+     put the word "Dispatch" on the wall over a half-heard address. */
+  {dept:'West Lafayette FD', address:'2100 Yeager Road', city:'West Lafayette', units:['E3'],
+   eta:{scene:75, station:'WLFD Station 3'},
+   status:{state:'enroute', at:-25, text:'Engine 3 en route'},
+   transcript:'Engine 3 respond to 2100 Yeager Road, cross street Salisbury Street, caller is not answering the callback.'},
+  /* Three at once, newest first, which is the state this display could not
+     show at all until now: the second dispatch used to overwrite the first and
+     the fire left the screen with nobody told. `started` ages each one back
+     from the moment you press space. */
+  [{dept:'Purdue FD',         type:'Medical: Chest Pain',   address:'Cary Quadrangle',           city:'Purdue campus',  units:['M2','E11'],
+    started:25, eta:{scene:110, station:'Purdue FD'},
+    transcript:'Medic 2, Engine 11, respond to Cary Quadrangle for a 60 year old male, chest pain, conscious and breathing.'},
+   {dept:'West Lafayette FD', type:'Structure Fire',        address:'340 Sagamore Parkway West', city:'West Lafayette', units:['E2','E3','L1','BC1'],
+    started:260, eta:{scene:150, station:'WLFD Station 2'},
+    status:{state:'on_scene', at:165, text:'Engine 2 on scene, smoke showing'},
+    transcript:'Engine 2, Engine 3, Ladder 1, Battalion 1, respond to 340 Sagamore Parkway West for a reported structure fire, smoke showing from the second floor.'},
+   {dept:'Tippecanoe County Fire', type:'Carbon Monoxide Alarm', address:'1820 Cumberland Avenue', city:'West Lafayette', units:['E3'],
+    started:620, eta:{scene:190, station:'WLFD Station 1'},
+    status:{state:'clear', at:560, text:'Engine 3 clear, in service'},
+    transcript:'Engine 3, respond to 1820 Cumberland Avenue for a carbon monoxide alarm activation, no one reporting symptoms.'},
+   /* And a typeless one in the list, to show that a row titled by its address
+      is set as an address there too rather than dressed as a category. */
+   {dept:'West Lafayette FD', address:'2100 Yeager Road', city:'West Lafayette', units:['E3'],
+    started:480, eta:{scene:150, station:'WLFD Station 3'},
+    status:{state:'on_scene', at:230, text:'Engine 3 on scene'},
+    transcript:'Engine 3 respond to 2100 Yeager Road, cross street Salisbury Street.'}],
+  /* One channel grant, two transmissions -- the state this file could not show
+     at all until the server learned to split a record. "Dispatch 16, that is a
+     negative." and the "Clear, thank you." answering it are one Broadcastify
+     record, one mp3, and they used to arrive here as a single row with both
+     voices inside it, under one wall clock, reading as one person saying all of
+     it. The last two rows below share a clip id and differ only in their range:
+     two lines, two stamps a couple of seconds apart, two offsets, one download.
+     Nothing groups them, because the whole complaint was that they looked
+     grouped. */
+  {dept:'Purdue FD', type:'Medical: Chest Pain', address:'Cary Quadrangle',
+   city:'Purdue campus', units:['M16','E11'], started:95,
+   eta:{scene:105, station:'Purdue FD'},
+   status:{state:'enroute', at:25, text:'Medic 16 en route'},
+   radio:[
+     {at:0, clip:'11', dispatch:true,
+      text:'Medic 16, Engine 11, respond to Cary Quadrangle for a 60 year old '
+         + 'male, chest pain, conscious and breathing.'},
+     {at:63.98, clip:'12', start:0.58, end:3.11, play_start:0.33, play_end:3.36,
+      text:'Dispatch 16, that is a negative.'},
+     {at:66.82, clip:'12', start:3.42, end:4.52, play_start:3.17, play_end:4.77,
+      text:'Clear, thank you.'}]},
   null,        // idle
   'error',     // error
 ];
 
+/* The transcript with no clip behind it: mock dispatches carry no audio, and
+   neither does a source running without an archive. The line is still worth
+   showing -- it is what the headline above was read out of. */
+function tapeFor(call, radio){
+  if(radio && radio.length) return radio;
+  if(!call || !call.transcript) return [];
+  return [{id:'t'+call.ts, ts:call.ts, text:call.transcript,
+           dispatch:true, url:null}];
+}
+
+/* One shape for the rest of the file to work against, whatever answered.
+   A server that predates multiple calls sends one call with its radio at the
+   top level; a server that predates the radio fields sends neither. Both are
+   normalised here rather than guarded for in twenty places downstream. */
+function callsFrom(j){
+  const list = Array.isArray(j.calls) && j.calls.length ? j.calls
+             : (j.call ? [j.call] : []);
+  const at = now();
+  return list.map((c, i) => {
+    const out = {...c,
+      /* Stable for the call's whole life, and never an array index: the list
+         re-orders as new calls land, and focus has to survive that. */
+      id: c.id ?? ('d:' + c.dept),
+      radio_start: c.radio_start ?? (i === 0 ? j.radio_start : null),
+      radio_dispatch_ts: c.radio_dispatch_ts ?? (i === 0 ? j.radio_dispatch_ts : null),
+    };
+    out.radio = tapeFor(out, c.radio ?? (i === 0 ? j.radio : null));
+    return out;
+  /* The server owns the grace period now, but an older one holds its single
+     call forever -- so the display keeps its own expiry, or "Nothing running"
+     would never come back on a machine that has not been updated. */
+  }).filter(c => at - lastHeard(c) <= FADE_AFTER * 1.5);
+}
+
+/* One demo entry into the shape a real payload has. The offsets are relative
+   because the demo call is stamped when you press space, not when the file was
+   written. */
+function demoCall(d, n, now){
+  const ts = now - (d.started || 0);
+  const c = {...d, id:'demo'+n, ts};
+  if(d.eta) c.eta = {
+    station:d.eta.station, scene_at:ts + d.eta.scene, estimated:true,
+    passes_you:d.eta.pass != null,
+    pass_at:d.eta.pass != null ? ts + d.eta.pass : null,
+    closest_metres:d.eta.near};
+  if(d.status) c.status =
+    {state:d.status.state, ts:ts + d.status.at, text:d.status.text};
+  /* A demo entry may spell its transmissions out one by one, which is the only
+     way to show from file:// what the server now sends: several rows off one
+     record, each carrying its own range into it. None of them gets a url --
+     there is no audio in the demo, and giving these rows one would take the
+     space bar away from cycling the states, which is the only way to reach
+     them. `at` is seconds from this call's dispatch, same as everything else
+     in here. */
+  c.radio = d.radio
+    ? d.radio.map((r, k) => ({id:`demo${n}-${k}`, clip:r.clip ?? null,
+                              ts:ts + r.at, text:r.text, dispatch:!!r.dispatch,
+                              url:null,
+                              start:r.start ?? null, end:r.end ?? null,
+                              play_start:r.play_start ?? null,
+                              play_end:r.play_end ?? null}))
+    : tapeFor(c, null);
+  /* Read off the rows rather than assumed to be the call's own stamp, because
+     with a spelled-out tape they are no longer the same instant -- and the
+     +Xs on every row is measured from the dispatch. */
+  c.radio_start = c.radio.length ? c.radio[0].ts : ts;
+  c.radio_dispatch_ts = (c.radio.find(r => r.dispatch) || {}).ts ?? ts;
+  return c;
+}
+
 function showDemo(i){
   const d = DEMO[((i % DEMO.length) + DEMO.length) % DEMO.length];
-  if(d === 'error'){ mode='error'; lastError='HTTP 401 from Broadcastify: check bcfy_api_key'; current=null; }
-  else if(d){ mode='call'; current = {...d, ts: Date.now()/1000}; }
-  else { mode='idle'; current=null; }
+  focusId = null;                      /* every state starts on its newest */
+  if(d === 'error'){ mode='error'; lastError='HTTP 401 from Broadcastify: check bcfy_api_key';
+                     calls=[]; current=null; }
+  else if(d){
+    mode='call';
+    const stamp = now();
+    calls = (Array.isArray(d) ? d : [d]).map((x, n) => demoCall(x, n, stamp));
+    applyFocus();
+  }
+  else { mode='idle'; calls=[]; current=null; }
+  /* The tape first, so the ages and offsets the screen is about to draw are
+     measured against a conversation that is already in hand. */
+  radioSync();
   render();
   modeBtn.hidden = false;
   modeBtn.textContent = `demo ${((i%DEMO.length)+DEMO.length)%DEMO.length+1}/${DEMO.length}`;
@@ -373,13 +1583,27 @@ function showDemo(i){
 let live = false;
 async function poll(){
   try{
+    const t0 = Date.now()/1000;
     const r = await fetch('/api/current', {cache:'no-store'});
     if(!r.ok) throw new Error('HTTP '+r.status);
     const j = await r.json();
+    /* Sampled every poll rather than once at startup, because the failure this
+       is here for -- a device that syncs, or steps, hours after it booted --
+       happens long after the page loaded. A server too old to send j.now
+       leaves SKEW at zero, which is exactly the old behaviour. */
+    if(j.now != null) noteSkew(j.now, t0, Date.now()/1000);
     live = true; modeBtn.hidden = true;
     if(j.hold_seconds) FADE_AFTER = j.hold_seconds;
-    if(j.ok === false){ mode='error'; lastError = j.error || 'unknown'; current = null; }
-    else { current = j.call || null; mode = current ? 'call' : 'idle'; }
+    /* The calls are read even on a source error: the error state owns the
+       screen, but the transcript and the audio behind it are still the last
+       thing that was heard, and taking them away as well helps nobody. */
+    calls = callsFrom(j);
+    applyFocus();
+    if(j.ok === false){ mode = 'error'; lastError = j.error || 'unknown'; }
+    else mode = current ? 'call' : 'idle';
+    /* Tape before screen: callStart() and lastHeard() read the conversation,
+       and painting the call first would age it against last poll's radio. */
+    radioSync();
     render();
   }catch(e){
     if(live){ live=false; mode='error'; lastError='unreachable'; render(); return; }
@@ -389,9 +1613,30 @@ async function poll(){
 poll();
 setInterval(poll, 2000);
 
-/* Keyboard: space cycles the demo states so each one can be designed. */
+/* Keyboard, and it is the primary control surface here: T transcript,
+   A audio, L back to live, C the next running call, Escape back to the newest,
+   space play/pause. Any of them also counts as the gesture browsers want
+   before they will let a page make noise, so a stray keypress is enough to
+   start the sound whichever key it was.
+   Off the wire (opened as a file) space keeps its old job of cycling the
+   demo states, because that is the only way to see each one. */
 addEventListener('keydown', e => {
-  if(e.code === 'Space' && !live){ e.preventDefault(); showDemo(++demoIndex); }
+  if(e.key === 't' || e.key === 'T'){ e.preventDefault(); return toggle('tape', !showTape); }
+  if(e.key === 'a' || e.key === 'A'){ e.preventDefault(); return toggle('auto', !autoPlay); }
+  if(e.key === 'l' || e.key === 'L'){ e.preventDefault(); return goLive(); }
+  if(e.key === 'c' || e.key === 'C' || e.key === 'ArrowDown'){
+    e.preventDefault(); return cycleFocus(1); }
+  if(e.key === 'ArrowUp'){ e.preventDefault(); return cycleFocus(-1); }
+  /* Escape is the way back to "whatever is newest", which is where an
+     unattended screen belongs. */
+  if(e.key === 'Escape'){
+    e.preventDefault(); focusId = null; focusUntil = 0;
+    applyFocus(); showFocusedTape(); return render(); }
+  if(e.code === 'Space'){
+    e.preventDefault();
+    if(live || tape.some(t => t.url)) playPause();
+    else showDemo(++demoIndex);
+  }
 });
 modeBtn.addEventListener('click', () => showDemo(++demoIndex));
 render();

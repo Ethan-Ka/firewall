@@ -1,16 +1,23 @@
 """Purdue campus emergency status, for the West Lafayette build.
 
 Purdue publishes campus status at https://www.purdue.edu/emergency/ ("Campus
-Safety Status"). It is a WordPress site, so there are three ways in, and only
-one of them works:
+Safety Status"). It is a WordPress site, so there are several ways in, and none
+of the machine-readable ones survive:
 
   /feed/                      dead. Two years stale, and the single item in it
                               is the ITaP boilerplate "Getting Started" post.
                               Verified 2026-08-19.
   /wp-json/wp/v2/posts        the same one boilerplate post. Alerts are not
                               posts; they are edits to the front page.
-  /wp-json/wp/v2/pages?slug=home    the front page as JSON, with modified_gmt.
-                              This is the live status, so this is what we read.
+  /wp-json/wp/v2/pages?slug=home    was the front page as JSON, with a
+                              modified_gmt worth having. As of 2026-08-20 the
+                              whole /wp-json tree answers 200 with a generic
+                              HTML page instead -- the REST API is off, and
+                              asking anyway just spends a request per poll to
+                              print a JSONDecodeError.
+
+So the page itself is the source. It is the same markup the JSON carried, minus
+the modification timestamp.
 
 The status itself is prose in <h2> headings, one per campus:
 
@@ -27,7 +34,6 @@ because the failure that matters is a live emergency rendering as "all clear".
 No requests dependency: this is one GET, and mock mode still installs nothing.
 """
 import html as _html
-import json
 import re
 import sys
 import time
@@ -36,7 +42,6 @@ import urllib.request
 from . import core
 
 PAGE_URL = "https://www.purdue.edu/emergency/"
-API_URL = PAGE_URL + "wp-json/wp/v2/pages?slug=home"
 UA = "firewall/0.1 (ambient dispatch display; polls every few minutes)"
 
 # Other Purdue campuses share this page. Two hours away is not your problem.
@@ -86,20 +91,6 @@ def _get(url, timeout=20):
 
 def fetch(timeout=20):
     """Current campus status. Raises on a total failure to reach the page."""
-    try:
-        body = json.loads(_get(API_URL, timeout))
-        page = body[0] if isinstance(body, list) and body else {}
-        info = parse((page.get("content") or {}).get("rendered") or "")
-        info["modified"] = page.get("modified_gmt")
-        if info["status"] != "unknown":
-            return info
-    except Exception as e:                      # noqa: BLE001 - fall through
-        print(f"[purdue] wp-json unavailable ({type(e).__name__}: {e}), "
-              f"reading the page itself", file=sys.stderr)
-
-    # Same headings, same cut-at-the-first-h3 rule, so the same parser works on
-    # the served HTML. Kept as a fallback because the status is worth one retry
-    # through a different door before the screen goes quiet about it.
     info = parse(_get(PAGE_URL, timeout))
     info["modified"] = None
     return info

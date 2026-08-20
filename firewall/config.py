@@ -39,6 +39,16 @@ DEFAULTS = {
     "bcfy_password": None,
     "bcfy_system_id": None,                      # RadioReference sid
     "bcfy_api_base": "https://api.bcfy.io",      # host only; paths are /{endpoint}/v1
+    # How far behind the wall clock the Live Calls cursor is held, in seconds.
+    # The API filters on the call START time but cannot publish a call until it
+    # has ENDED and cleared a 10-30s ingest, so a cursor parked on the newest
+    # timestamp steps over calls that publish late and never asks for them
+    # again. 60 = 30s worst-case ingest + the longest transmission seen here
+    # (18s) + one round-robin cycle. It is not free: the endpoint has no
+    # upper-bound parameter, so the window is re-read every poll. See the cost
+    # table in sources.broadcastify(). 0 restores the old lastPos cursor:
+    # cheapest, and loses traffic.
+    "bcfy_lag_seconds": 10,
 
     # --- source: trunk (local SDR) ----------------------------------------
     "trunk_dir": "./trunk-out",
@@ -46,7 +56,32 @@ DEFAULTS = {
     # --- shared ------------------------------------------------------------
     "talkgroups": WEST_LAFAYETTE_FIRE,
     "poll_seconds": 5,
-    "whisper_model": "base.en",     # tiny.en | base.en | small.en
+    # small.en is the floor that reliably handles 8kHz trunked radio: base.en
+    # turns "Purdue" into "Pretty" and "Earhart" into "your heart" often enough
+    # to lose the address. It is ~3x slower per clip and still well under the
+    # gap between calls on a two-talkgroup watch.
+    "whisper_model": "small.en",    # tiny.en | base.en | small.en | medium.en
+    # Comma-separated names to bias the decoder toward. Empty uses the
+    # West Lafayette / Purdue list in core.SCANNER_VOCAB.
+    "whisper_vocab": None,
+    # Silero VAD before transcription. Off: it truncates noisy transmissions.
+    "whisper_vad": False,
+    "whisper_beam": 8,
+    # Re-decode, unbiased, when something that reads like a dispatch parsed
+    # without an address. Costs a second or two, only on the calls that need it.
+    "whisper_retry": True,
+    # Directory to archive call audio into, for tuning transcription against
+    # calls that came out wrong. Unset means clips are transcribed and dropped.
+    "audio_dir": "~/Documents/firewall-data/clips",
+    # Where incidents are kept: one directory per call, holding every
+    # transmission's audio and an incident.json. This is what --replay reads.
+    "incident_dir": "~/Documents/firewall-data/incidents",
+    # Hand-typed truth for saved clips: firewall --label, firewall --score.
+    "corpus_path": "~/Documents/firewall-data/corpus.jsonl",
+    # Quiet time after which an incident is over even if nobody said "code 4".
+    "incident_gap_seconds": 900,
+    # A second dispatch this soon after the first is the same call being
+    # restated, not a new one.
     "use_llm_parser": False,        # needs ANTHROPIC_API_KEY
     "hold_seconds": 600,            # how long a call stays on screen
     "port": 842,
@@ -70,10 +105,19 @@ ENV_KEYS = {
     "BCFY_PASSWORD": "bcfy_password",
     "BCFY_SYSTEM_ID": "bcfy_system_id",
     "BCFY_API_BASE": "bcfy_api_base",
+    "BCFY_LAG_SECONDS": "bcfy_lag_seconds",
     "BCFY_TALKGROUPS": "talkgroups",
     "FIREWALL_POLL_SECONDS": "poll_seconds",
     "FIREWALL_TRUNK_DIR": "trunk_dir",
     "FIREWALL_WHISPER_MODEL": "whisper_model",
+    "FIREWALL_WHISPER_VOCAB": "whisper_vocab",
+    "FIREWALL_WHISPER_VAD": "whisper_vad",
+    "FIREWALL_WHISPER_BEAM": "whisper_beam",
+    "FIREWALL_WHISPER_RETRY": "whisper_retry",
+    "FIREWALL_AUDIO_DIR": "audio_dir",
+    "FIREWALL_INCIDENT_DIR": "incident_dir",
+    "FIREWALL_CORPUS": "corpus_path",
+    "FIREWALL_INCIDENT_GAP": "incident_gap_seconds",
     "FIREWALL_USE_LLM_PARSER": "use_llm_parser",
     "FIREWALL_HOLD_SECONDS": "hold_seconds",
     "FIREWALL_PORT": "port",
@@ -102,10 +146,19 @@ _CASTS = {
     "home": _home,
     "siren_metres": int,
     "poll_seconds": int,
+    "bcfy_lag_seconds": int,
+    "incident_gap_seconds": int,
     "hold_seconds": int,
     "port": int,
     "purdue_poll_seconds": int,
     "use_llm_parser": lambda v: v.strip().lower() in ("1", "true", "yes", "on"),
+    "whisper_vad": lambda v: v.strip().lower() in ("1", "true", "yes", "on"),
+    "whisper_beam": int,
+    "audio_dir": lambda v: str(Path(v).expanduser()),
+    "incident_dir": lambda v: str(Path(v).expanduser()),
+    "corpus_path": lambda v: str(Path(v).expanduser()),
+    "trunk_dir": lambda v: str(Path(v).expanduser()),
+    "whisper_retry": lambda v: v.strip().lower() in ("1", "true", "yes", "on"),
     "talkgroups": lambda v: {
         int(pair.split(":", 1)[0].strip()): pair.split(":", 1)[1].strip()
         for pair in v.split(",") if ":" in pair
@@ -169,6 +222,8 @@ def load_dotenv(path=None):
 
 def load(path=None):
     cfg = dict(DEFAULTS)
+    # Paths written with ~ have to work whether they came from DEFAULTS, a
+    # config.json or the environment, so expand after everything is merged.
     p = Path(path) if path else find_file("config.json")
     if p is not None and p.exists():
         user = json.loads(p.read_text())
@@ -186,4 +241,7 @@ def load(path=None):
             cfg[key] = cast(raw) if cast else raw
         except (ValueError, IndexError):
             raise SystemExit(f"{env_name} is malformed: {raw!r}")
+    for key in ("audio_dir", "incident_dir", "corpus_path", "trunk_dir"):
+        if isinstance(cfg.get(key), str):
+            cfg[key] = str(Path(cfg[key]).expanduser())
     return cfg

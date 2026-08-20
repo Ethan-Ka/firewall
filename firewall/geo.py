@@ -9,7 +9,7 @@ Both need a station, an incident location, and a travel-time estimate. All three
 are approximations, and the honest error bar is +/- a minute or two -- see
 ETA_NOTE below before trusting a number off this module.
 """
-import json, math, os, time, urllib.parse, urllib.request
+import json, math, os, re, time, urllib.parse, urllib.request
 from pathlib import Path
 
 # Station coordinates, from OpenStreetMap's named building POIs rather than
@@ -122,13 +122,32 @@ LANDMARK_ALIASES = {
     "mackey":                  "Mackey Arena",
     "elliott hall":            "Elliott Hall of Music",
     "wetherill":               "Wetherill Laboratory of Chemistry",
+    # Not shorthand -- a genuine trap. Bare "Beering" resolves to North Steven
+    # Beering Drive, a road 1.3km from Beering Hall on the far side of campus,
+    # so a dispatch the parser reduced to "Beering" put the truck in the wrong
+    # place while looking perfectly resolved.
+    "beering":                 "Beering Hall",
+    "beering hall":            "Beering Hall",
 }
+
+
+# The one piece of dispatch shorthand not worth listing hall by hall. A
+# dispatcher calls it Earhart Residence Hall; OSM calls it Earhart Hall, and the
+# difference is the entire lookup -- "Earhart Residence Hall" and "Earhart
+# Residence" both resolve to nothing at all, while "Earhart Hall" and "Earhart"
+# both land on 40.42581, -86.92496. Both null forms are sitting in the live
+# cache right now, which is a real dispatch that reached the screen with no
+# location on it.
+_RESIDENCE = re.compile(r"\s+residence(\s+hall)?\s*$", re.I)
 
 
 def _alias(street):
     """Resolve dispatch shorthand to something a geocoder knows, or pass through."""
     key = " ".join(str(street).lower().replace(".", "").replace(",", "").split())
-    return LANDMARK_ALIASES.get(key, street)
+    if key in LANDMARK_ALIASES:
+        return LANDMARK_ALIASES[key]
+    fixed = _RESIDENCE.sub(" Hall", str(street))
+    return fixed if fixed != str(street) else street
 
 
 # ------------------------------------------------------------------ geocoding
@@ -275,15 +294,25 @@ def split_address(text, city="West Lafayette", state="IN"):
     return street, city, state
 
 
-def geocode(text, city="West Lafayette", state="IN"):
-    """(lat, lon) for a dispatch address, or None. Cached on disk forever.
+def _lookup(street, city, state):
+    """One address through both geocoders in turn. (lat, lon, label) or None."""
+    for source in (_nominatim, _census):
+        try:
+            hit = source(street, city, state)
+        except Exception:
+            hit = None
+        if hit:
+            return hit
+    return None
 
-    Accepts either a bare street ("340 Sagamore Pkwy W"), a landmark ("Cary
-    Quadrangle"), or a full one-line address with city, state and ZIP. Addresses
-    repeat -- the same apartment block, the same intersection -- so the cache
-    means a busy night mostly costs nothing and stays inside Nominatim's rate
-    limit.
-    """
+
+# Everything parse.py puts between the two streets of a corner, plus the "/" a
+# dispatcher writes for a state-road junction.
+_JOINER = re.compile(r"\s+(?:and|at|&)\s+|\s*/\s*", re.I)
+
+
+def _key(text, city, state):
+    """(street, city, state, cache key) for an address, or None if there is none."""
     if not text:
         return None
     street, city, state = split_address(text, city, state)
@@ -293,23 +322,62 @@ def geocode(text, city="West Lafayette", state="IN"):
     aliased = _alias(street)
     if aliased != street:
         street, city, state = split_address(aliased, city, state)
-    key = f"{street.strip().lower()}|{city.lower()}|{state.lower()}"
+    return street, city, state, f"{street.strip().lower()}|{city.lower()}|{state.lower()}"
+
+
+def geocode(text, city="West Lafayette", state="IN"):
+    """(lat, lon) for a dispatch address, or None. Cached on disk forever.
+
+    Accepts either a bare street ("340 Sagamore Pkwy W"), a landmark ("Cary
+    Quadrangle"), an intersection ("Third Street and Wood Street"), or a full
+    one-line address with city, state and ZIP. Addresses repeat -- the same
+    apartment block, the same intersection -- so the cache means a busy night
+    mostly costs nothing and stays inside Nominatim's rate limit.
+    """
+    parts = _key(text, city, state)
+    if not parts:
+        return None
+    street, city, state, key = parts
     cache = _load_cache()
     if key in cache:
         v = cache[key]
         return tuple(v[:2]) if v else None
 
-    hit = None
-    for source in (_nominatim, _census):
-        try:
-            hit = source(street, city, state)
-        except Exception:
-            hit = None
-        if hit:
-            break
-    cache[key] = list(hit) if hit else None
+    hit, approx = _lookup(street, city, state), False
+    if not hit and _JOINER.search(street):
+        # A corner resolves only where OSM carries the crossing node, and often
+        # it does not: "Stadium Avenue and Martin Jischke Drive" comes back at
+        # 40.431448, -86.921567 while "Third Street and Wood Street" and
+        # "Marsteller Street and Third Street" come back with nothing at all,
+        # though all three are real corners within a few blocks of campus. So a
+        # miss retries on the first street named, which is the one the
+        # dispatcher said first and the one the crew is driving down: a mile of
+        # the right road beats the blank screen that a call with no location
+        # leaves, and that blankness is the one failure this display cannot
+        # absorb. approximate() below is how anyone downstream can tell.
+        first = _JOINER.split(street)[0].strip()
+        fall = geocode(first, city, state) if first else None
+        if fall:
+            hit, approx = (fall[0], fall[1], f"nearest street of {street}"), True
+    # Written under the key that was asked for either way, so the corner OSM has
+    # never heard of costs its two lookups once and not once per dispatch -- and
+    # a total miss still stores null, which is what stops it being re-queried
+    # forever.
+    cache[key] = (list(hit) + [True] if approx else list(hit)) if hit else None
     _save_cache()
     return (hit[0], hit[1]) if hit else None
+
+
+def approximate(text, city="West Lafayette", state="IN"):
+    """Did geocode(text) answer with one street of an intersection?
+
+    Reads the cache geocode() has just filled and never the network, so it costs
+    nothing, and it stays honest for a caller who has replaced geocode() with a
+    stub: an unlooked-up address is not approximate, it is simply unknown.
+    """
+    parts = _key(text, city, state)
+    v = _load_cache().get(parts[3]) if parts else None
+    return bool(v and len(v) > 3 and v[3])
 
 
 # ------------------------------------------------------------------- the answer
@@ -333,31 +401,57 @@ def assess(call, cfg):
     wants them: if the run passes within earshot, when it passes you is the
     headline and the scene ETA is the footnote. If it does not, or you have set
     no home, the scene ETA is all there is.
+
+    Re-runs cheaply, and is meant to: core calls it again whenever the radio
+    says something that moves call["status"], because a heard status beats a
+    modelled one. Every lookup it does is served from the geocode cache.
     """
     key = station_for(call.get("dept"), call.get("units"))
     if not key or not call.get("address"):
         return None
     _, slat, slon = STATIONS[key]
     station = (slat, slon)
-    incident = geocode(call["address"], call.get("city") or "West Lafayette")
+    where = call.get("city") or "West Lafayette"
+    incident = geocode(call["address"], where)
     if not incident:
         return None
 
-    # Elapsed since the call hit the radio; the truck has had this long already.
-    age = max(0.0, time.time() - float(call.get("ts") or time.time()))
+    now = time.time()
+    base = float(call.get("ts") or now)
     scene_m = haversine(station, incident)
-    scene_eta = TURNOUT_SECONDS + travel_seconds(scene_m) - age
+
+    # Turnout is the guessed half of this sum, and the radio can replace it with
+    # a fact. On the Medic 16 call the guess had the truck on scene at +140s
+    # while at +152s the unit was still calling itself en route -- it had not
+    # finished turnout at the moment we claimed it had finished the whole run.
+    # So once a crew says it is rolling, that instant is the baseline and the
+    # 80s target is dropped: only the drive is still being estimated.
+    status = call.get("status") or {}
+    rolling_at = (float(status["ts"]) if status.get("state") == "enroute"
+                  else base + TURNOUT_SECONDS)
 
     # Absolute arrival instants as well as the relative seconds: the display
     # counts down every second, and a target it can subtract `now` from stays
     # right no matter how long the payload sat in flight or on screen.
-    base = float(call.get("ts") or time.time())
+    scene_at = rolling_at + travel_seconds(scene_m)
+    # Clamped at zero: Broadcastify publishes a call 10-30s after it went out,
+    # so a short run is often already over by the time we see it, and "on scene
+    # in ~-243s" is not a thing the display should ever say.
     out = {"station": STATIONS[key][0],
            "station_key": key,
            "incident": [round(incident[0], 6), round(incident[1], 6)],
+           # True when geocode() fell back to one street of an intersection, so
+           # the point is somewhere on the right road rather than at the corner.
+           # Every distance and ETA below is built on it, so the display should
+           # be free to hedge them. Nothing reads it yet.
+           "incident_approx": approximate(call["address"], where),
            "scene_metres": round(scene_m),
-           "scene_eta": round(scene_eta),
-           "scene_at": round(base + TURNOUT_SECONDS + travel_seconds(scene_m)),
+           "scene_eta": round(max(0, scene_at - now)),
+           "scene_at": round(scene_at),
+           # Never dropped and never conditional: every arrival time this module
+           # produces is modelled, not heard, and the display has to be able to
+           # say so in the one place a viewer reads it as a fact.
+           "estimated": True,
            "passes_you": False}
 
     home = _home_point(cfg)
@@ -367,9 +461,9 @@ def assess(call, cfg):
         out["home_metres"] = round(haversine(home, incident))
         if near_m <= cfg.get("siren_metres", SIREN_METRES):
             out["passes_you"] = True
-            # Distance travelled before the closest approach to you.
-            out["pass_eta"] = round(
-                TURNOUT_SECONDS + travel_seconds(scene_m * frac) - age)
-            out["pass_at"] = round(
-                base + TURNOUT_SECONDS + travel_seconds(scene_m * frac))
+            # Distance travelled before the closest approach to you, off the
+            # same baseline as the scene arrival for the same reason.
+            pass_at = rolling_at + travel_seconds(scene_m * frac)
+            out["pass_eta"] = round(max(0, pass_at - now))
+            out["pass_at"] = round(pass_at)
     return out

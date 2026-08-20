@@ -13,3 +13,8 @@ recordings/
 firewall.egg-info/
 *.egg-info/
 .geocache.json
+
+# archived call audio (FIREWALL_AUDIO_DIR)
+clips/
+incidents/
+corpus.jsonl
