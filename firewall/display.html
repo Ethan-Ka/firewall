@@ -419,6 +419,16 @@ const modeBtn = document.getElementById('mode');
 let calls = [], current = null;
 let painted = null, mode = 'boot', demoIndex = 0, lastError = null;
 
+/* Every transmission the server still holds, in the order it was said, whether
+   or not a call claimed it -- and this screen showed none of it until there
+   was a call to hang it on. Traffic that parsed as chatter, and everything said
+   before the first dispatch of the evening, was downloaded, transcribed and
+   logged while the display sat on "Nothing running". Being heard is now enough
+   to be on the radio bar; the calls are what organise it above.
+   Empty against a server too old to send it, which is exactly the old
+   behaviour. */
+let feed = [];
+
 /* Focus is normally automatic -- the newest dispatch -- and a viewer can move
    it. It lapses back on its own, because this screen is unattended most of the
    time and whoever pressed C is usually not still standing there. */
@@ -1041,7 +1051,17 @@ function paintTape(){
 /* The clip being played need not be on the tape you are looking at: audio
    follows the radio, and the radio does not care which call has the headline.
    So rows are looked up across every live call, and the bar says whose. */
-const allRows = () => calls.flatMap(c => c.radio || []);
+/* The feed carries rows the calls also carry -- same ids, same clips -- so
+   they are merged on id rather than concatenated, and the call's copy wins:
+   it is the one focus, attribution and the offsets above are read from. Sorted
+   by when it was said, because grantNote counts a row's place among the keyups
+   of one recording and "2 of 2" has to mean the second voice. */
+const allRows = () => {
+  const seen = new Map();
+  for(const r of calls.flatMap(c => c.radio || [])) seen.set(r.id, r);
+  for(const r of feed) if(!seen.has(r.id)) seen.set(r.id, r);
+  return [...seen.values()].sort((a,b) => a.ts - b.ts);
+};
 const findRow = id => allRows().find(r => r.id === id) || tape.find(r => r.id === id);
 const callOfRow = id => calls.find(c => (c.radio||[]).some(r => r.id === id));
 
@@ -1201,9 +1221,14 @@ function pump(){
    rows against another's dispatch is exactly the class of mistake that put a
    wrong +Xs on this screen in the first place. */
 function showFocusedTape(){
-  const list = (current && current.radio) || [];
-  radioMeta = current ? {start:current.radio_start,
-                         dispatch:current.radio_dispatch_ts} : {};
+  /* A call in focus owns the bar, and its own dispatch is the zero its offsets
+     are measured from. With no call -- or one the server has no transcript for
+     -- the bar falls back to the feed, where there is no dispatch to measure
+     against and paintTape times the rows from the oldest one shown. */
+  const own = (current && current.radio && current.radio.length) ? current.radio : null;
+  const list = own || feed;
+  radioMeta = own ? {start:current.radio_start,
+                     dispatch:current.radio_dispatch_ts} : {};
   const same = list.length === tape.length && list.every((t,i) => t.id === tape[i].id);
   tape = list;
   if(!same) paintTape(); else paintBar();
@@ -1572,6 +1597,9 @@ function showDemo(i){
     applyFocus();
   }
   else { mode='idle'; calls=[]; current=null; }
+  /* The demo is not the radio: it must not be drawn on top of a feed left over
+     from a server that answered earlier. */
+  feed = [];
   /* The tape first, so the ages and offsets the screen is about to draw are
      measured against a conversation that is already in hand. */
   radioSync();
@@ -1598,6 +1626,7 @@ async function poll(){
        screen, but the transcript and the audio behind it are still the last
        thing that was heard, and taking them away as well helps nobody. */
     calls = callsFrom(j);
+    feed = Array.isArray(j.feed) ? j.feed : [];
     applyFocus();
     if(j.ok === false){ mode = 'error'; lastError = j.error || 'unknown'; }
     else mode = current ? 'call' : 'idle';

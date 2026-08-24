@@ -193,6 +193,28 @@ def _tape_put(dept, text, ts, audio, dispatch, span=None):
     return rid
 
 
+def _tape_amend(rid, text=None, dispatch=None):
+    """Correct a row already on the tape. Ignores an id that has been evicted.
+
+    The row goes up before the parse runs (see publish), so the two things the
+    parse decides -- whether a second decode heard the transcript better, and
+    whether this was a dispatch -- arrive after it is already on screen. A
+    snapshot taken in that window shows the row un-flagged, which is the whole
+    of the cost: it is a poll or two of a dispatch not yet drawn as one, against
+    a transmission not reaching the screen at all until whisper has run twice.
+    """
+    if rid is None:
+        return
+    with _lock:
+        row = next((r for r in _tape if r["id"] == rid), None)
+        if row is None:
+            return
+        if text is not None:
+            row["text"] = text
+        if dispatch is not None:
+            row["dispatch"] = bool(dispatch)
+
+
 def clip(cid):
     """One kept clip as (bytes, mime), or None. Read by /api/clip.
 
@@ -310,6 +332,33 @@ def _public(call):
     return out
 
 
+def _feed():
+    """Everything heard recently, whoever it belongs to. The caller holds the lock.
+
+    The tape used to reach the display only through a call: /api/current
+    published `radio` per call, and _rows_for scopes that to the conversation a
+    dispatch opened on one department. So a transmission the parser did not read
+    as a dispatch -- which is most of them, and all of them before the first
+    dispatch of the day -- was downloaded, transcribed, split, kept on the tape
+    and written to the incident log while the screen showed nothing at all. The
+    log said it was saved because it was saved. There was simply no route from
+    the tape to the browser that did not go through a call.
+
+    This is that route. A transmission reaches the screen because it was heard,
+    not because something downstream managed to classify it, and the calls are
+    what organise it afterwards.
+
+    Bounded by time rather than by rows: _tape holds up to _TAPE_CLIPS, which on
+    a quiet night is hours deep, and an hour-old exchange redrawn under a live
+    clock reads as traffic happening now. The window is the one that retires a
+    call, so the bar goes quiet at the same moment the wall says nothing is
+    running.
+    """
+    cut = time.time() - _hold_seconds[0]
+    rows = sorted((r for r in _tape if r["ts"] >= cut), key=lambda r: r["ts"])
+    return [_row(c) for c in rows[-_TAPE_ROWS:]]
+
+
 def _closed_at(call):
     """When the radio closed this call, or None if it has not."""
     st = call.get("status") or {}
@@ -347,6 +396,7 @@ def snapshot():
     with _lock:
         _prune()
         calls = [_public(c) for c in _calls]
+        feed = _feed()
         purdue = _state["purdue"]
     head = calls[0] if calls else None
     # The single-call keys are the whole payload as far as any display built
@@ -354,6 +404,10 @@ def snapshot():
     # meant: the newest call and its radio. Adding "calls" beside them is what
     # lets an old display keep rendering while a new one shows the rest.
     return {**_health, "purdue": purdue, "calls": calls, "call": head,
+            # Every transmission still on the tape, in the order it was said,
+            # whether or not a call claimed it. The display shows this when no
+            # call has the screen, so being heard is enough to be on it.
+            "feed": feed,
             "radio": head["radio"] if head else [],
             "radio_start": head["radio_start"] if head else None,
             "radio_dispatch_ts": head["radio_dispatch_ts"] if head else None}
@@ -871,6 +925,14 @@ def publish(dept, text, ts, cfg, audio=None, span=None):
     # transcript is what was heard, and nothing was. The display is what says
     # so, rendering an empty row as "(no speech)".
     text = text.strip()
+    # The tape first, before a word of this is parsed. Everything below --
+    # the parse, a second whisper decode that runs for seconds, the geocoder --
+    # is work that decides how a transmission is FILED, and none of it is a
+    # precondition for having heard it. Filing it first is what kept traffic off
+    # the screen entirely whenever nothing downstream claimed it, so the rule is
+    # now the other way round: it hits the display, then it gets sorted out.
+    # _tape_amend puts the parse's two corrections back onto the row.
+    rid = _tape_put(dept, text, ts, audio, False, span)
     f = _parse.parse(text, cfg) if text else {}
     # A dispatch with no location is the one outcome worth spending time on:
     # it is unusable on screen, and the address is usually there in the audio.
@@ -888,6 +950,11 @@ def publish(dept, text, ts, cfg, audio=None, span=None):
             if g.get("address"):
                 print(f"  .  second pass recovered a location: {alt!r}")
                 text, f = alt, g
+                # The row on screen is showing the first decode. Correct it in
+                # place rather than adding a second row: one keyup was heard
+                # once, and two lines saying it differently is a lie about the
+                # radio.
+                _tape_amend(rid, text=text)
     # A hospital is where the patient goes, never where the call is. Dropped
     # here, once, so neither the screen nor the log can be handed one as a
     # location: "Medic 16 is going to be en route to IU" is a medic leaving a
@@ -896,10 +963,13 @@ def publish(dept, text, ts, cfg, audio=None, span=None):
     if _incidents.is_hospital(f.get("address")):
         f = {**f, "address": None}
     is_dispatch = bool(f) and _is_dispatch(f, text)
-    # Keep the audio alongside its transcript so the display can play the call
-    # back rather than only report it. Chatter is kept as well: what actually
-    # happened on the call is said on the radio afterwards, not in the parse.
-    _tape_put(dept, text, ts, audio, is_dispatch, span)
+    # The audio is already alongside its transcript, so the display can play the
+    # call back rather than only report it -- chatter included, because what
+    # actually happened on the call is said on the radio afterwards, not in the
+    # parse. All that is left is to mark the row the tones came in on: the tape
+    # is grouped into conversations on that flag, and the display draws it.
+    if is_dispatch:
+        _tape_amend(rid, dispatch=True)
     # Read once and handed to both, because a call coming back turns on what
     # this transmission reports (see incidents.reopens) and the log and the
     # screen must not answer that question differently.

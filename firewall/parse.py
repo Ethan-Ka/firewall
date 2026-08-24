@@ -42,7 +42,59 @@ ABBR = {"engine": "E", "medic": "M", "ladder": "L", "truck": "T", "squad": "SQ",
         "rescue": "R", "tanker": "TK", "brush": "BR", "battalion": "BC",
         "ambulance": "A", "car": "C", "chief": "CH"}
 
-# Extend this as you hear how your dispatchers actually phrase things.
+# --------------------------------------------------------------- crash family
+# "Crash" was one label, and on a campus that is the wrong number. Purdue runs
+# thousands of rental e-scooters and bicycles; a scooter laid down at Third and
+# Russell and a two-car wreck on Sagamore are not the same call, do not bring the
+# same trucks, and are not the same thing to see on a wall. Both used to read
+# "Vehicle Crash", because the generic pattern matched the word "crash" and the
+# vehicle it happened on was thrown away.
+#
+# Every one of these is REASONED, not measured: there is no crash in the labelled
+# archive to fit them against, unlike the keyup thresholds in segments.py. So
+# they are written to fail toward the old behaviour -- a phrase these do not
+# recognise still lands on "Vehicle Crash" exactly as it did, and the worst case
+# is a scooter crash titled the way it was titled yesterday.
+#
+# Each takes TWO words in either order, and that is the whole safety argument:
+# a call type on its own is enough to open a call (core._is_dispatch returns
+# True on any type), so a bare noun here would put a card on the wall for
+# "there's a scooter blocking the bay door". A vehicle is only a crash when
+# something crash-shaped is said about it, and "scooter versus vehicle",
+# "PI accident involving a scooter" and "fell off a scooter" all say it.
+_CRASH_EVENT = (r"crash|collision|wreck|\baccident\b|\bmva\b|personal injury|"
+                r"\bstruck\b|\bhit by\b|\bversus\b|\bvs\b|rollover|"
+                r"\bejected\b|\bpinned\b|\binjur\w*|\bfell\b|\bfall(?:en)?\b|"
+                r"\blaid (?:it|the bike) down\b")
+
+# "bike" is left out in front of path, lane, rack and trail: on this campus those
+# are places, and "respond to the bike path for a fall" is a fall, on a path,
+# which is what the display should say. "motorbike" survives \bbikes?\b intact
+# (no boundary after the r), and is claimed by the motorcycle line above anyway.
+_SCOOTER    = r"\b(?:e[-\s]?)?scooters?\b|\bmopeds?\b|\bveo\b"
+# \w* rather than s?: the rider is named as often as the machine, and
+# "a bicyclist was struck by a car" is the same call as "a bicycle was struck".
+_MOTORCYCLE = r"\bmotorcycl\w*|\bmotorbikes?\b|\bdirt bikes?\b"
+_BICYCLE    = (r"\bbicycl\w*|\bbikes?\b(?!\s+(?:path|lane|rack|trail))|"
+               r"\bcyclists?\b|\bbikers?\b")
+_PEDESTRIAN = r"\bpedestrians?\b|\bped struck\b"
+
+
+def _crash_on(vehicle):
+    """A crash word and `vehicle` both said, in whichever order they were said.
+
+    Zero-width on purpose. TYPE_HINTS patterns are joined into _IS_TYPE as
+    alternatives, and a lookahead pair joins cleanly there: it asks "does this
+    text carry a call type", which is exactly what _IS_TYPE means, and it
+    matches nothing it would then have to give back.
+    """
+    return rf"(?=.*(?:{_CRASH_EVENT}))(?=.*(?:{vehicle}))"
+
+
+# Extend this as you hear how your dispatchers actually phrase things. First
+# match in list order wins, so anything more specific than the line below it has
+# to be written above it -- which is the entire reason the crash family sits
+# where it does, ahead of both "fall" and the generic crash.
 TYPE_HINTS = [
     (r"structure fire|working fire|building fire",       "Structure Fire"),
     (r"vehicle fire|car fire",                           "Vehicle Fire"),
@@ -63,8 +115,22 @@ TYPE_HINTS = [
     (r"smoke detector|detector activation",              "Detector Activation"),
     (r"seizure",                                         "Medical: Seizure"),
     (r"overdose|narcan",                                 "Medical: Overdose"),
+    # The crash family, most specific first. Ahead of "fall" deliberately:
+    # somebody who came off a scooter fell, and the fall is the least useful
+    # true thing that can be said about it. Motorcycle precedes bicycle so
+    # "dirt bike" is not read as a bicycle.
+    (_crash_on(_SCOOTER),                                "Scooter Crash"),
+    (_crash_on(_MOTORCYCLE),                             "Motorcycle Crash"),
+    (_crash_on(_BICYCLE),                                "Bicycle Crash"),
+    (_crash_on(_PEDESTRIAN),                             "Pedestrian Struck"),
     (r"fall(en)?|lift assist",                           "Fall / Lift Assist"),
-    (r"personal injury|pi accident|crash|collision|mva", "Vehicle Crash"),
+    # Everything left over: the actual crash, two vehicles or one, and nothing
+    # said about anyone on two wheels. "accident" is admitted only with a word
+    # in front of it, because a bare one is something a crew says about a hose
+    # coupling and a call type is enough on its own to put a card on the wall.
+    (r"personal injury|(?:pi|vehicle|traffic|auto|motor vehicle) accident|"
+     r"accident with injur|crash|collision|\bwreck\b|\bmva\b|hit and run|"
+     r"roll[-\s]?over|(?:vehicle|car|truck) versus",    "Vehicle Crash"),
     (r"carbon monoxide|co alarm",                        "Carbon Monoxide Alarm"),
     (r"gas leak|odor of gas|natural gas",                "Gas Leak"),
     (r"water rescue",                                    "Water Rescue"),

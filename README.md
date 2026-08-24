@@ -436,8 +436,12 @@ library in `config.py`, so mock mode still has no dependencies.
   "call": { "dept": "...", "type": "...", "address": "...",
             "city": "...", "units": ["E2"], "ts": 1787115224.0 },
   "radio": [
-    { "id": "41", "ts": 1787115224.0, "dispatch": true,
+    { "id": "41-1", "ts": 1787115224.0, "dispatch": true,
       "text": "Engine 2, Ladder 1, respond to 340 Sagamore Parkway West...",
+      "url": "/api/clip?id=41" }
+  ],
+  "feed": [
+    { "id": "41-1", "ts": 1787115224.0, "dispatch": true, "text": "...",
       "url": "/api/clip?id=41" }
   ],
   "ok": true,
@@ -455,6 +459,20 @@ text. `GET /` serves the display.
 chatter after it. It is grouped by the radio's own rhythm rather than by the call's
 timestamp — a transmission mentioning a fire re-parses as a dispatch and replaces
 the call, and keying on that would silently drop everything said before it.
+
+`feed` is every transmission still held, in the order it was said, whether or not a
+call claimed it — same row shape, same ids, same clip urls. It exists because the
+tape used to reach the browser only through a call: traffic that did not parse as a
+dispatch, and everything said before the first dispatch of the evening, was
+downloaded, transcribed, kept and written to the incident log while the display
+showed nothing at all. A transmission is on the screen because it was heard; the
+calls are what organise it afterwards. The display draws the focused call's `radio`
+when there is one and `feed` when there is not, and it is bounded by `hold_seconds`,
+so the bar goes quiet at the same moment the wall says nothing is running.
+
+Publishing runs in that order too. A row goes on the tape before the parse, before
+the second whisper decode a location-less dispatch triggers, and before the
+geocoder: none of that decides whether something was heard, only how it is filed.
 
 `GET /api/clip?id=41` returns that transmission's audio from memory, with byte-range
 support so the display's scrub bar can seek. `404` once it has aged out of the tape.
@@ -478,6 +496,28 @@ building on campus, `LANDMARK_RE` captures whatever sits between the dispatcher'
 captures that ran into the call type instead of a place name. Street match wins
 when both are present, since a landmark capture would happily swallow an address.
 
+**A crash is five call types, not one.** Purdue runs thousands of rental
+e-scooters and bicycles, and a scooter laid down at Third and Russell is not a
+two-car wreck on Sagamore: different trucks, different scene, different thing to
+see on a wall. Both used to read `Vehicle Crash`, because the generic pattern
+matched the word "crash" and threw away the vehicle it happened on. There are now
+`Scooter Crash`, `Motorcycle Crash`, `Bicycle Crash`, `Pedestrian Struck` and
+`Vehicle Crash`, in that order — first match wins, so the specific ones sit above
+the generic one, and above `Fall / Lift Assist` as well, because somebody who came
+off a scooter did fall and the fall is the least useful true thing to say about it.
+
+Each of the four specific ones needs **two** words said, in either order: the
+vehicle and something crash-shaped about it. That is a safety rule rather than a
+nicety — a call type on its own is enough to open a call, so a bare noun would put
+a card on the wall for "there's a scooter blocking the bay door". `scooter versus
+vehicle`, `PI accident involving a scooter` and `fell off a scooter` all qualify;
+`bike` in front of `path`, `lane`, `rack` or `trail` is a place and never a
+crash. The generic line admits a bare `accident` only with `vehicle`, `traffic`,
+`auto`, `motor vehicle` or `PI` in front of it, for the same reason. Unlike the
+keyup thresholds in `segments.py`, none of this is measured against the archive —
+there is no crash in it — so it is written to fail toward the old behaviour: a
+phrase these do not recognise still lands on `Vehicle Crash`.
+
 Shorthand is resolved by `LANDMARK_ALIASES` in `geo.py` — `PMU`, `the Union`,
 `Cary Quad`, `CoRec`, `Ross-Ade`, `Mackey`, `Wetherill`. Two entries exist because
 OSM has no matching name at all (`Purdue Memorial Union` and `Krannert` map to
@@ -495,6 +535,8 @@ Current coverage across the standard phrasings, all the way through to an ETA:
 ```
 340 Sagamore Parkway West   Structure Fire          scene ~134s
 1820 Cumberland Avenue      Vehicle Crash           scene ~186s
+Third and Russell           Scooter Crash           scene ~157s
+Stadium and Martin Jischke  Bicycle Crash           scene ~184s
 500 W Navajo Street         Automatic Fire Alarm    scene ~325s
 415 North River Road        Carbon Monoxide Alarm   scene ~480s
 Cary Quadrangle             Medical: Chest Pain     scene ~137s
