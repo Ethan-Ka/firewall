@@ -8,7 +8,7 @@ One process, one command: listen, transcribe, parse, display.
 
 ```
   audio in  ->  whisper  ->  parse  ->  current call  ->  display
-  (mock | broadcastify | trunk-recorder)
+  (broadcastify | trunk-recorder)
 ```
 
 ---
@@ -46,16 +46,33 @@ something the design had to solve.
 python3 -m firewall --open
 ```
 
-That runs the whole system with synthetic dispatches every 45 seconds. No
-credentials, no audio, no hardware, and no dependencies: mock mode is pure
-standard library, because `requests` and `faster-whisper` are imported lazily
-inside the sources that need them.
+That watches Broadcastify, which needs credentials in `.env` and is billed per
+record read. `firewall --check` verifies the key without starting the poll
+loop, and `--source trunk` reads a local trunk-recorder directory instead,
+which costs nothing.
+
+There is no mock source and no demo mode. There was one of each, generating a
+dispatch every 45 seconds so the screens could be worked on without
+credentials, and both were removed: a fabricated structure fire at a real
+address is not a harmless placeholder on a display whose only job is saying
+what is actually on fire. A screen that invents a call when it cannot reach its
+server is worse than a blank one, because a blank one is obviously broken and a
+burning building is not. Unreachable now says it is unreachable.
 
 To get the bare `firewall` command instead of `python3 -m firewall`:
 
 ```bash
 pip install -e .
 firewall --open
+```
+
+There are two screens. `/` is the wall display: one call, read from across a
+hallway. `/tracker` is the data view: what the department actually gets called
+to, and every call in the log with its own state.
+
+```bash
+./scripts/run-tracker.sh              # opens /tracker
+./scripts/run-tracker.sh --source trunk
 ```
 
 ---
@@ -128,11 +145,281 @@ Rewrite `display.html` from scratch if you want. Nothing else changes.
 
 ---
 
+## The tracker
+
+The display answers "what is happening right now" for somebody walking past.
+The tracker answers a different question, and it needs a different screen:
+what does this department get called to, and where has each of those calls got
+to. It is at `/tracker`.
+
+Four panels. Three of them are readings of the same radio, and the fourth is
+who is on the other end of it:
+
+- **Call types.** A horizontal bar per call type over the chosen window, sorted
+  by count. Fills carry the family (fire and hazard, EMS and rescue,
+  unclassified) and the type's own name carries its identity, so the chart is
+  legible with no colour at all. Every count is printed at the bar tip rather
+  than left in a tooltip, and a table view of the same numbers is one button
+  away.
+- **Calls.** One row per call, newest first, live ones marked with a dot and
+  the word `live`. Opening a row shows that call's units, how far along it got,
+  when it closed and how long it ran, and the incident id `firewall --replay`
+  takes.
+- **Radio.** Every transmission still held, in the order it was said, whether
+  or not a call claimed it. The same `feed` the display draws from.
+- **The department.** Purdue University Fire Department itself: what it turns
+  out for, and all eleven rigs it owns with a photograph of each. Every unit
+  says what it has done in the same window the chart above is drawing, and a
+  unit that is out right now says so in the same words the call table uses.
+  Open one for its chassis, pump, tank and crew.
+
+  The photographs are Chris Allen's, out of the Purdue and Purdue Airport
+  galleries at IndianaFireTrucks.com, and they are all rights reserved. So
+  they are loaded from his server rather than copied into this one: no
+  photograph he owns is in this repository or in the build Vercel serves, the
+  watermark arrives in the frame he cropped, and every tile carries his name
+  and links back to that photograph's own page.
+
+  The cost of that is a panel that needs a route to the internet -- a tile
+  with no route says `photo offline` rather than showing a broken image. If
+  that matters more, or you have your own photographs, drop files named for
+  the unit into `web/src/assets/units/` and they win, at build time, offline.
+
+A filter row sits above all of them: department, and a 24 hour / 7 day / all
+window. One filter row rather than four, so the chart, the table and the
+roster's own counts can never end up describing different sets of calls. The screen opens on the narrowest
+window that actually has calls in it, because a tracker left running for a week
+and then glanced at should not greet you with an empty chart that looks broken.
+
+### Building it
+
+Unlike the display, this one has a build step. It is React, Tailwind v4 and
+shadcn/ui, with d3 for the chart's scales and motion for its transitions.
+
+```bash
+cd web
+npm install
+npm run build        # writes web/dist/
+```
+
+The build is not committed. `./scripts/run-tracker.sh` makes one when it is
+missing and rebuilds when something under `web/src` is newer than the last one,
+saying so when it does; `firewall` serves whatever is in `web/dist` at
+`/tracker`, and answers with the command above when there is nothing there.
+
+`npm run dev` gives the usual Vite dev server with `/api` proxied to
+`localhost:842`, so run `firewall` alongside it and the wire is live, cookies
+and all. `FIREWALL_ORIGIN` moves the proxy if the server is on another port.
+
+### Hosting it
+
+The tracker is a static site and does not have to live on the machine holding
+the radio. `web/` deploys to Vercel as it stands -- Vite preset, root directory
+`web`, no build command to type -- and `vercel.json` carries the two things a
+single-page app wants from a static host: every path answers with `index.html`,
+and the hashed bundles are cached for a year.
+
+The question is how the hosted page gets the calls, and there are two answers.
+
+#### Push, which is the default
+
+The machine running `firewall` posts a snapshot outward every ten seconds. The
+hosted half -- three functions in `web/api/` and one key in a Redis -- keeps the
+last day of it and serves it back to the page as `/api/log` and `/api/current`,
+the same shapes the server itself serves.
+
+Nothing reaches into a home network. There is no port to forward, no tunnel to
+keep up and no certificate to renew, and the page still renders when the radio
+machine is off, stamped with how long ago it last said anything. The page is a
+copy a few seconds behind, and it says so: `pushed 4s ago` sits in the status
+line and turns amber when the seconds become minutes.
+
+On Vercel: add a Redis (Storage → Upstash for Redis → connect), which sets
+`KV_REST_API_URL` and `KV_REST_API_TOKEN` for you, and set
+`FIREWALL_PUSH_TOKEN` to a secret. In `.env` here:
+
+```
+FIREWALL_PUSH_URL=https://your-project.vercel.app/api/push
+FIREWALL_PUSH_TOKEN=<the same secret>
+```
+
+`firewall --check` sends one and tells you what came back, which is worth doing
+once: a wrong token and a project with no store connected both look like a
+tracker that is simply empty, and empty reads as a quiet department.
+
+Two things do not travel. The audio stays in the memory of the process that
+recorded it -- a day of trunked radio is gigabytes, and Redis is not where it
+would go -- so rows are pushed with their url made absolute against
+`FIREWALL_PUBLIC_URL` if this machine has a public address, and nulled if it
+does not, which the tracker has always drawn as a disabled play button. And the
+words, if `FIREWALL_USERS` is set: they are stripped before they leave. That is
+not a limitation of the hosted half but the same decision the server already
+made, honoured at the one point where it would otherwise be quietly undone.
+
+#### Direct, which is live
+
+The hosted page fetches this server itself. Live to the second and the audio
+plays, at the price of the server being reachable from the internet over HTTPS.
+
+- **`VITE_API_BASE`**, in the Vercel project, is the public origin of the
+  machine running `firewall` -- the tunnel in front of it. Read at build time,
+  because a static site has nothing to ask at runtime, so changing it means
+  redeploying. Empty -- the default, and what the push deployment uses -- means
+  the page reads its own origin.
+- **`FIREWALL_ALLOW_ORIGINS`**, on the server, names the deployment's origin.
+  Exact origins, comma-separated; a browser will not accept a wildcard on a
+  credentialed read and one is not offered. Vercel gives each deployment its own
+  hostname, so a preview URL you intend to open needs naming next to the
+  production one.
+
+Setting the second also moves the session cookie to `SameSite=None; Secure`,
+which browsers store only over HTTPS. That is not an extra requirement so much
+as the same one twice: a page hosted elsewhere can only reach this server if
+something is already terminating TLS in front of it. On a plain-HTTP server the
+login stops working, and it stops working locally too.
+
+Everything a directly-connected page can read is everything a signed-in browser
+can read: the calls, the addresses, the ETAs, the audio, and the transcripts if
+that browser is signed in at the tunnel origin. There is no version of this
+where the allowlist is a formality.
+
+#### What is kept, and for how long
+
+A day, and the number is enforced in four places on purpose:
+
+| Where | What it does |
+| --- | --- |
+| `FIREWALL_PUSH_HOURS` | how much of the log leaves this machine |
+| `RETAIN_HOURS` on Vercel | the expiry on the stored snapshot, and the ceiling on `/api/log?hours=` |
+| `VITE_RETAIN_HOURS` | what the page asks for, keeps of the answer, and offers as a window |
+| the server's own `/api/log?hours=` | the same window when a page reads it directly |
+
+Three of those are code that could be wrong and one is a database refusing to
+hold anything older, which is why they are not collapsed into one. The visible
+consequence is that the hosted tracker has no "7 days" chip: a window chooser
+offering a week over a day of data is worse than not offering it, because an
+empty week reads as a quiet department rather than as a window that was never
+filled.
+
+The `firewall` server itself is unchanged -- it has the whole incident log on
+disk and a screen in the same building can still ask for all of it.
+
+### Why it looks the way it does
+
+The palette is shadcn's `stone` rather than its default `neutral`, and that is
+not a taste call: the display has been running a warm neutral ramp on `#1A1917`
+since it was built, stone's dark card token resolves to `#1c1917`, and the two
+screens hang two feet apart. An achromatic grey next to a warm one reads as two
+programs.
+
+The chart's two fills are the display's own clay and pine hues stepped darker
+and more saturated. The display's `#E8A791` and `#7ECBBF` were tried first and
+fail as fills: at OKLCH lightness 0.785 they sit above the band a mark needs in
+dark mode and their chroma reads as grey. That is not a fault in them. They
+were chosen as text on a dark wall, which is a different job, and they are
+still used for exactly that here. The fills measure:
+
+```
+mark hazard  #cb6440   4.53:1 on the card surface
+mark ems     #00a08f   5.35:1
+unclassified #78716c   3.65:1
+worst adjacent pair    dE 11.0 deutan, 24.1 normal vision
+```
+
+Unclassified is deliberately a grey and not a third hue. "The parser did not
+recognise this" is an absence, and giving it an identity colour would state
+one.
+
+## Sharing it, and the login
+
+Everything about this is public radio until the moment a transcript is
+involved. So the transcript is the only thing that can be locked, and it locks
+on its own:
+
+```bash
+firewall --invite alex
+```
+
+That prints a generated password and the exact `FIREWALL_USERS` line to paste
+into `.env`. Restart, and from then on the screens still show every call --
+type, address, units, status, ETA, the chart, the log -- and still play every
+clip to anyone who opens them. Only the words come out of the payload, and
+`/login` puts them back.
+
+```
+FIREWALL_USERS=alex:reed-tumbler-42,sam:kiln-oxbow-9
+```
+
+With that line empty, which is the default, there is no login and nothing is
+gated. One screen on one wall on one network does not need a lock on its own
+door, and adding the first account is what turns the whole thing on.
+
+### Why the line is drawn there
+
+"Structure fire at 340 Sagamore" is a fact about a building. "60 year old male,
+chest pain, conscious and breathing" is a fact about somebody's grandfather,
+and it is the transcript that carries it. Gating the text while still serving
+the clip it was made from does not hide what was said from someone determined
+to listen -- it is not meant to. It stops the transcript being a searchable,
+screenshottable, indexable record of a medical call, which is the part that
+actually travels.
+
+The review page at `/review` is the exception that proves it: it is a
+transcript editor end to end, there is no version of it with the words gone,
+so it is behind the login rather than merely quieter behind it. Same for
+`/api/clips`, `/api/transcribe` and `/api/label`.
+
+### What a session is
+
+A signed cookie and no server-side state. `auth.issue` writes a name and an
+expiry and signs both; `auth.verify` checks the signature and the clock. There
+is no session table to keep, nothing to clean up, and a restart does not sign
+anyone out.
+
+The signing key is derived from `FIREWALL_USERS` unless you set
+`FIREWALL_SECRET`. That is the property worth having: **deleting somebody's
+line revokes them immediately**, because every cookie signed under the old
+credential list stops verifying the moment the list changes. The cost is that
+adding a friend signs out the friends you already have. Set `FIREWALL_SECRET`
+to a random string if you would rather have it the other way.
+
+Ten wrong passwords from one address and that address waits five minutes. A
+generated password is three words and two digits, which is plenty against a
+person typing and nothing at all against a script left running for a weekend;
+the throttle is what makes the difference.
+
+### Reaching it from outside the house
+
+`--invite` prints this machine's LAN address, which is what a friend on the
+same wifi needs. From anywhere else, put it behind something that terminates
+TLS -- a Tailscale tunnel, a Cloudflare tunnel, an nginx with a certificate --
+and do not port-forward 842 to the internet as it is. The session cookie is
+always `HttpOnly`, and on a plain-HTTP server it is `SameSite=Lax` and not
+`Secure`, because a `Secure` cookie is simply never stored over plain HTTP and
+the login would fail on the wifi with no error a person could read. Over a
+tunnel that terminates TLS in front of it, the browser is talking HTTPS and the
+cookie is protected in transit regardless.
+
+Setting `allow_origins` for a hosted tracker flips both: that tracker is a
+different site, `Lax` means the browser never sends the cookie with its
+fetches, and signing in would appear to work while the words stayed missing for
+ever. So the cookie becomes `SameSite=None; Secure`, which is only stored over
+HTTPS -- already true of anything a hosted page can reach. Setting
+`allow_origins` on a plain-HTTP server therefore breaks its own login, and that
+is the honest failure: the configuration says the browser is somewhere else.
+The tracker's own "sign in" link points at the server's `/login`, not its own
+origin, and hands it the page to come back to.
+
+The passwords sit in `.env` in the clear. That is a deliberate trade for a
+program with no database, and it is why `--invite` generates them rather than
+inviting anyone to choose one: they must be worth nothing if the file leaks.
+
+---
+
 ## Sources
 
 | `--source` | Needs | Latency | Use it for |
 |---|---|---|---|
-| `mock` *(default)* | nothing | n/a | design and pipeline work |
 | `broadcastify` | API key, about $5 credit | 10 to 30s, unmeasured | no hardware at all |
 | `trunk` | Airspy plus trunk-recorder | 1 to 3s | the full local build |
 
@@ -366,7 +653,7 @@ to cost you an evening.
 
 Each step stands on its own, and the first one costs nothing.
 
-1. **Run `--source mock` and build the display.** No accounts, no hardware.
+1. **Run `--source trunk` against a recorded directory and build the display.** No accounts, no metered billing.
 2. **Point the pipeline at Broadcastify.** You find out the real call volume near
    your house, the exact phrasing your dispatchers use, and whether transcription
    and parsing hold up, before buying anything. If the answer is no, you have spent
@@ -404,7 +691,7 @@ DEFAULTS in config.py  <  config.json  <  .env  <  real environment
 ```
 
 `.env.example` documents every variable. The loader is thirty lines of standard
-library in `config.py`, so mock mode still has no dependencies.
+library in `config.py`, so the server starts without optional dependencies.
 
 | Key | Default | What it does |
 |---|---|---|
@@ -424,6 +711,9 @@ library in `config.py`, so mock mode still has no dependencies.
 | `use_llm_parser` | `false` | Needs `ANTHROPIC_API_KEY` |
 | `hold_seconds` | 600 | How long a call stays on screen |
 | `port` | 842 | HTTP port |
+| `users` | none | `name:password` pairs; empty means no login and no gate |
+| `session_secret` | derived | Cookie signing key; unset derives it from `users` |
+| `session_days` | 30 | How long a sign-in lasts |
 
 ---
 
@@ -451,6 +741,53 @@ library in `config.py`, so mock mode still has no dependencies.
 }
 ```
 
+`GET /api/log`
+
+```json
+{
+  "calls": [
+    { "id": "West Lafayette FD|1787883326",
+      "incident": "1787883326-west-lafayette-fd-structure-fire",
+      "dept": "West Lafayette FD", "opened": 1787883326, "closed": null,
+      "type": "Structure Fire", "address": "340 Sagamore Parkway West",
+      "city": null, "units": ["E2", "L1"], "count": 12, "live": true,
+      "status": { "state": "on_scene", "ts": 1787883501.0, "text": "..." },
+      "eta": null }
+  ],
+  "logged": true,
+  "now": 1787883342.359
+}
+```
+
+Every call this installation knows about, live and filed, as one list, newest
+first. `/api/current` publishes the four calls that fit on a wall, which is the
+right answer for a wall and useless for counting anything: a chart of call types
+over a shift needs the calls that have already scrolled off it. Those are on
+disk and the running ones are in memory, and `core.roster` is the only place the
+two are put together. Deliberately: a live call and its own incident are the
+same call, and a client merging the two lists itself would draw every running
+call twice. The key is `(dept, opened)`, which is the pair both ids were built
+out of. Where both exist the live call wins on everything the radio is still
+changing (type, address, units, status, eta) and the incident contributes the
+two things memory does not have, how many transmissions were filed and when the
+log stamped it closed.
+
+`logged` is whether anything is being written to disk at all, which is not the
+same question as whether there are any calls. `incident_dir` can be unset, and
+an empty roster is often the expected state rather than a fault.
+The tracker needs to tell those apart to say the right thing.
+
+`status` and `eta` are `null` on a filed call and that is not an omission. The
+log records what was said, not the state machine core ran over it, and
+rebuilding them from the transmissions would be a second implementation of
+`read_status` that could disagree with the first.
+
+`GET /tracker` serves the tracker out of `web/dist`, or a 404 naming the command
+that builds it, and `GET /assets/...` serves its bundles. A tracker hosted
+elsewhere never asks for either — it fetches only the `/api` routes, from
+whatever origin `FIREWALL_ALLOW_ORIGINS` lets in, and `OPTIONS` answers the
+preflight the browser sends first.
+
 `call` is `null` when nothing is running. When `ok` is `false`, `error` carries the
 source's last failure verbatim, and the display renders its error state with that
 text. `GET /` serves the display.
@@ -476,6 +813,47 @@ geocoder: none of that decides whether something was heard, only how it is filed
 
 `GET /api/clip?id=41` returns that transmission's audio from memory, with byte-range
 support so the display's scrub bar can seek. `404` once it has aged out of the tape.
+
+### When transcripts are gated
+
+`/api/current` and `/api/log` both carry `"speech": true`. On an installation
+with `FIREWALL_USERS` set, a request with no valid session cookie gets
+`"speech": false` and every word nulled out — `call.transcript`,
+`status.text`, `reopenings[].text`, and `text` on every `radio` and `feed` row.
+Nothing else changes: same rows, same ids, same clip urls, same timings, same
+`hold_seconds`. A client that ignores `speech` still renders and still plays;
+one that reads it can say "locked" rather than "(no speech)", which is the
+difference between a row nobody may read and a transmission where nothing was
+said.
+
+`null`, not `""`, and the distinction is the point: `""` already means the
+radio keyed up and no words came out of it.
+
+`/api/clips`, `/api/transcribe` and `/api/label` answer `401` instead of
+redacting — they are transcripts end to end, and with the words gone there is
+nothing left of them. `GET /review` redirects to `/login?next=/review`, because
+a page can be sent somewhere a `fetch` cannot.
+
+```
+POST /api/login    {"username": "alex", "password": "..."}
+                   -> 200 + Set-Cookie, or 401, or 429 after ten wrong tries
+POST /api/logout   -> 200, cookie cleared
+GET  /logout       -> 302 to /, cookie cleared
+GET  /login        -> the form; 302 to / when no accounts are configured
+GET  /api/session  {"required": true, "user": "alex", "speech": true,
+                    "origins": ["https://tracker.example.com"]}
+```
+
+`/api/session` is what a front end reads to render the state honestly: whether
+there is a gate at all, who is through it, and therefore what an empty
+transcript means. `required: false` is an installation with no accounts, where
+`user` is `null` for everybody and everything is readable anyway. `origins` is
+the `allow_origins` list, published so the sign-in form can tell a return
+address it should honour from one somebody put in a link: `?next=` takes a path
+on this server always, and a whole URL only when its origin is on that list.
+
+The audio is never gated. See
+[Sharing it, and the login](#sharing-it-and-the-login) for why that is the line.
 
 ---
 
@@ -805,6 +1183,12 @@ Two rules regardless. Do not rebroadcast or republish the audio or the transcrip
 Do not put the screen where it is readable from the street, because dispatch
 occasionally reads patient details aloud.
 
+Sharing it with friends is where the second rule gets tested, which is what
+`FIREWALL_USERS` is for: see [Sharing it, and the login](#sharing-it-and-the-login).
+A login is not a legal position. It is the difference between a handful of
+people you know reading a transcript and it sitting on an open port for
+anything that crawls one.
+
 ---
 
 ## Risks
@@ -841,14 +1225,28 @@ the one that will eat a weekend.
 firewall/
   __main__.py     entry point, HTTP server, argument parsing
   config.py       defaults and config.json loading
-  sources.py      mock, broadcastify and trunk sources
+  sources.py      broadcastify and trunk sources
   core.py         shared state, whisper, publish, source health
   parse.py        transcript to structured call
   places.py       local names, for the recogniser and the parser
   incidents.py    grouping, recording and replaying whole incidents
+  push.py         posting a snapshot out to a hosted tracker
+  auth.py         who may read the transcripts, and the redaction itself
+  login.html      the sign-in form, served at /login
   review.html     the labelling UI, served at /review
   corpus.py       hand-typed truth, and the score against it
   display.html    the screen, standalone and editable live
+web/              the tracker: a static site, hosted or served at /tracker
+  api/            the hosted half: push in, log and current out, one key
+  vercel.json     the SPA rewrite, and the 24h retention a deployment gets
+  .env.example    VITE_API_BASE and VITE_RETAIN_HOURS
+  dist/           the build. Not committed; run-tracker.sh makes one
+  src/App.tsx     layout, polling, filter row
+  src/lib/        the wire contract the panels share, and purdue.ts: the
+                  department and its roster, with the sources for both
+  src/components/ TypeChart, CallTracker, Transcript, Roster, and shadcn/ui
+  src/assets/units/  empty, and read the README in it before filling it:
+                  a photograph named for a unit overrides the credited one
 ```
 
 ## License

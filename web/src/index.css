@@ -1,0 +1,180 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+    --color-mark-hazard: var(--mark-hazard);
+    --color-mark-ems: var(--mark-ems);
+    --color-mark-none: var(--mark-none);
+    --color-ink-hazard: var(--ink-hazard);
+    --color-ink-ems: var(--ink-ems);
+    --color-edge: var(--edge);
+    --font-heading: var(--font-sans);
+    --font-sans: 'IBM Plex Sans', system-ui, sans-serif;
+    --font-mono: 'IBM Plex Mono', ui-monospace, monospace;
+    --color-sidebar-ring: var(--sidebar-ring);
+    --color-sidebar-border: var(--sidebar-border);
+    --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+    --color-sidebar-accent: var(--sidebar-accent);
+    --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+    --color-sidebar-primary: var(--sidebar-primary);
+    --color-sidebar-foreground: var(--sidebar-foreground);
+    --color-sidebar: var(--sidebar);
+    --color-chart-5: var(--chart-5);
+    --color-chart-4: var(--chart-4);
+    --color-chart-3: var(--chart-3);
+    --color-chart-2: var(--chart-2);
+    --color-chart-1: var(--chart-1);
+    --color-ring: var(--ring);
+    --color-input: var(--input);
+    --color-border: var(--border);
+    --color-destructive: var(--destructive);
+    --color-accent-foreground: var(--accent-foreground);
+    --color-accent: var(--accent);
+    --color-muted-foreground: var(--muted-foreground);
+    --color-muted: var(--muted);
+    --color-secondary-foreground: var(--secondary-foreground);
+    --color-secondary: var(--secondary);
+    --color-primary-foreground: var(--primary-foreground);
+    --color-primary: var(--primary);
+    --color-popover-foreground: var(--popover-foreground);
+    --color-popover: var(--popover);
+    --color-card-foreground: var(--card-foreground);
+    --color-card: var(--card);
+    --color-foreground: var(--foreground);
+    --color-background: var(--background);
+    --radius-sm: calc(var(--radius) * 0.6);
+    --radius-md: calc(var(--radius) * 0.8);
+    --radius-lg: var(--radius);
+    --radius-xl: calc(var(--radius) * 1.4);
+    --radius-2xl: calc(var(--radius) * 1.8);
+    --radius-3xl: calc(var(--radius) * 2.2);
+    --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+/* -----------------------------------------------------------------------
+   Palette. shadcn's `stone` base rather than `neutral`, and the reason is
+   the wall this hangs on: firewall/display.html has been running a warm
+   neutral ramp on --n-900 #1A1917 since it was built, and stone's dark card
+   token resolves to #1c1917. The two screens are two feet apart and have to
+   read as one instrument, which an achromatic grey next to a warm one does
+   not. Everything else in shadcn's stone theme is left exactly as generated.
+
+   The four values below stone does NOT supply are the chart's, and they are
+   measured rather than picked:
+
+   --mark-hazard / --mark-ems are display.html's own clay and pine hues (OKLCH
+   H 39.5 and 183.3) stepped to L 0.62 / C 0.14. The display's own #E8A791 and
+   #7ECBBF were tried first and fail as fills -- at L 0.785 they sit above the
+   dark-mode mark band and their chroma reads as grey -- which is not a fault
+   in them: they were chosen as TEXT on a dark wall, which is a different job.
+   Validated against the card surface #1c1917: lightness band, chroma floor,
+   CVD separation (worst adjacent dE 11.0 deutan / 24.1 normal vision) and
+   contrast vs surface all pass.
+
+   --mark-none is the de-emphasis grey a call with no recognised type gets. It
+   is deliberately not a third hue: "the parser did not name this" is an
+   absence, and giving it an identity colour would state one.
+
+   --ink-hazard / --ink-ems are the display's original two, kept for the one
+   job they were made for: coloured text. 8.63:1 and 9.31:1 on the card.
+
+   Measured contrast on --card #1c1917:
+     foreground  16.74:1   muted-foreground 6.76:1   edge 3.65:1
+     mark-hazard  4.53:1   mark-ems         5.35:1   mark-none 3.65:1
+   ----------------------------------------------------------------------- */
+:root {
+    --mark-hazard: #cb6440;
+    --mark-ems: #00a08f;
+    --mark-none: #78716c;
+    --ink-hazard: #E8A791;
+    --ink-ems: #7ECBBF;
+    /* Borders that mean something -- an edge you can click, the rule under a
+       table head -- rather than shadcn's 10%-white hairline, which measures
+       1.15:1 and is decoration. 3.65:1 clears the 3:1 that non-text UI owes. */
+    --edge: #78716c;
+    --background: oklch(1 0 0);
+    --foreground: oklch(0.147 0.004 49.25);
+    --card: oklch(1 0 0);
+    --card-foreground: oklch(0.147 0.004 49.25);
+    --popover: oklch(1 0 0);
+    --popover-foreground: oklch(0.147 0.004 49.25);
+    --primary: oklch(0.216 0.006 56.043);
+    --primary-foreground: oklch(0.985 0.001 106.423);
+    --secondary: oklch(0.97 0.001 106.424);
+    --secondary-foreground: oklch(0.216 0.006 56.043);
+    --muted: oklch(0.97 0.001 106.424);
+    --muted-foreground: oklch(0.553 0.013 58.071);
+    --accent: oklch(0.97 0.001 106.424);
+    --accent-foreground: oklch(0.216 0.006 56.043);
+    --destructive: oklch(0.577 0.245 27.325);
+    --border: oklch(0.923 0.003 48.717);
+    --input: oklch(0.923 0.003 48.717);
+    --ring: oklch(0.709 0.01 56.259);
+    --chart-1: var(--mark-hazard);
+    --chart-2: var(--mark-ems);
+    --chart-3: var(--mark-none);
+    --chart-4: oklch(0.828 0.189 84.429);
+    --chart-5: oklch(0.769 0.188 70.08);
+    --radius: 0.25rem;
+    --sidebar: oklch(0.985 0.001 106.423);
+    --sidebar-foreground: oklch(0.147 0.004 49.25);
+    --sidebar-primary: oklch(0.216 0.006 56.043);
+    --sidebar-primary-foreground: oklch(0.985 0.001 106.423);
+    --sidebar-accent: oklch(0.97 0.001 106.424);
+    --sidebar-accent-foreground: oklch(0.216 0.006 56.043);
+    --sidebar-border: oklch(0.923 0.003 48.717);
+    --sidebar-ring: oklch(0.709 0.01 56.259);
+}
+
+.dark {
+    --background: oklch(0.147 0.004 49.25);
+    --foreground: oklch(0.985 0.001 106.423);
+    --card: oklch(0.216 0.006 56.043);
+    --card-foreground: oklch(0.985 0.001 106.423);
+    --popover: oklch(0.216 0.006 56.043);
+    --popover-foreground: oklch(0.985 0.001 106.423);
+    --primary: oklch(0.923 0.003 48.717);
+    --primary-foreground: oklch(0.216 0.006 56.043);
+    --secondary: oklch(0.268 0.007 34.298);
+    --secondary-foreground: oklch(0.985 0.001 106.423);
+    --muted: oklch(0.268 0.007 34.298);
+    --muted-foreground: oklch(0.709 0.01 56.259);
+    --accent: oklch(0.268 0.007 34.298);
+    --accent-foreground: oklch(0.985 0.001 106.423);
+    --destructive: oklch(0.704 0.191 22.216);
+    --border: oklch(1 0 0 / 10%);
+    --input: oklch(1 0 0 / 15%);
+    /* Not stone's grey ring. This screen is read and operated from a keyboard,
+       often by somebody who cannot see a mouse pointer across the room, so the
+       focus ring is the pine ink at 9.31:1 on the card instead of a mid-grey
+       that measures under 3:1 and disappears against half the surfaces here. */
+    --ring: #7ECBBF;
+    --chart-1: var(--mark-hazard);
+    --chart-2: var(--mark-ems);
+    --chart-3: var(--mark-none);
+    --chart-4: oklch(0.371 0 0);
+    --chart-5: oklch(0.269 0 0);
+    --sidebar: oklch(0.216 0.006 56.043);
+    --sidebar-foreground: oklch(0.985 0.001 106.423);
+    --sidebar-primary: oklch(0.923 0.003 48.717);
+    --sidebar-primary-foreground: oklch(0.216 0.006 56.043);
+    --sidebar-accent: oklch(0.268 0.007 34.298);
+    --sidebar-accent-foreground: oklch(0.985 0.001 106.423);
+    --sidebar-border: oklch(1 0 0 / 10%);
+    --sidebar-ring: #7ECBBF;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+    }
+  body {
+    @apply bg-background text-foreground;
+    }
+  html {
+    @apply font-sans;
+    }
+}

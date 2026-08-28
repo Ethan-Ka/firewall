@@ -285,6 +285,18 @@ h1.busy{font-size:clamp(1.75rem,4.6vw,3rem);max-width:20ch;
 #tape .off{font-family:var(--font-mono);font-size:0.8125rem;
            color:var(--text-muted);flex:none;min-width:3.6em;opacity:.65}
 #tape .said{font-size:var(--text-sm);line-height:1.4}
+/* A row nobody signed in for. Italic and dimmer, and worded as a lock rather
+   than as silence: "(no speech)" on a locked row would be a lie about the
+   radio, and the difference between "nothing was said" and "you may not read
+   what was said" is the entire point of the gate. */
+#tape .said.locked{font-style:italic;opacity:.72}
+/* Sits in the replay bar because that is the row of controls, and it is a
+   link rather than a chip so it works on a screen with the cursor hidden:
+   the URL is readable off the wall and typable on a phone. */
+.bar a.signin{font-size:var(--text-sm);color:var(--pine-300);
+              text-decoration:none;border-bottom:1px solid transparent}
+.bar a.signin:hover{border-bottom-color:var(--pine-300)}
+.bar a.signin[hidden]{display:none}
 #tape li.dispatch button{color:var(--text-body)}
 /* Playing now: colour AND a leading marker, same rule as the home units. */
 #tape li[aria-current="true"] button{color:var(--tone)}
@@ -373,18 +385,18 @@ body.pointer{cursor:auto}
     <button class="seek" id="seek" type="button" aria-label="Seek"><i></i></button>
     <span class="t" id="rtime">0:00 / 0:00</span>
     <button class="play live" id="golive" hidden type="button"
-            title="L — stop replaying and follow the radio again">▸ live</button>
+            title="L — stop replaying or being paused, and follow the radio again">▸ live</button>
     <span class="who" id="rwho"></span>
+    <a class="signin" id="signin" href="/login" hidden>transcript locked · sign in</a>
   </div>
 </section>
 <audio id="au" preload="none"></audio>
 
 <div id="chips">
   <button class="chip" id="t-tape" type="button" aria-pressed="true"
-          title="T — transcript and replay bar · L — back to live after a replay · C — next running call · Esc — newest">transcript</button>
+          title="T — transcript and replay bar · L — back to live after a replay or a pause · C — next running call · Esc — newest">transcript</button>
   <button class="chip" id="t-auto" type="button" aria-pressed="true"
           title="A — play each new transmission as it arrives · space — play/pause">audio</button>
-  <button class="chip" id="mode" hidden type="button"></button>
 </div>
 
 <script>
@@ -409,7 +421,6 @@ const HOME_UNITS = /^(E2|M2|L1|E11)$/i;
 let FADE_AFTER = 600;              // overridden by the server's hold_seconds
 const el = document.getElementById('screen');
 const bar = document.getElementById('age');
-const modeBtn = document.getElementById('mode');
 
 /* `calls` is every call still running, newest dispatch first, and `current` is
    whichever one holds the headline. They used to be the same single thing, and
@@ -417,7 +428,7 @@ const modeBtn = document.getElementById('mode');
    structure fire was still working overwrote the fire, and the fire simply
    left the screen with nobody told. */
 let calls = [], current = null;
-let painted = null, mode = 'boot', demoIndex = 0, lastError = null;
+let painted = null, mode = 'boot', lastError = null;
 
 /* Every transmission the server still holds, in the order it was said, whether
    or not a call claimed it -- and this screen showed none of it until there
@@ -939,6 +950,12 @@ const setPref = (k, v) => { try{ localStorage.setItem(k, v ? '1' : '0') }catch(e
 let showTape = pref('firewall.transcript', true);
 let autoPlay = pref('firewall.audio', true);
 
+/* Whether the server is sending the words. False means somebody has put
+   transcripts behind a login and this browser is not signed in: the rows, the
+   timings and the audio all still arrive, and only the text is missing. */
+let speech = true;
+const signinEl = document.getElementById('signin');
+
 let tape = [], known = new Set(), queue = [], sel = null;
 let radioMeta = {};      /* radio_start / radio_dispatch_ts for the conversation */
 let primed = false;      /* the first payload is history, not news */
@@ -1038,11 +1055,13 @@ function paintTape(){
       <button type="button" data-id="${esc(t.id)}"${t.url?'':' disabled'}>
         <span class="at">${hhmmss(t.ts)}</span>
         <span class="off">${offset(t.ts - t0)}</span>
-        <span class="said">${esc(t.text || '(no speech)')}</span>
+        <span class="said${t.text || speech ? '' : ' locked'}">${
+          esc(t.text || (speech ? '(no speech)' : 'locked'))}</span>
       </button></li>`).join('');
   /* Following means the newest line; replaying means the line you clicked, so
      do not scroll the list out from under someone reading back through it. */
   if(follow) tapeEl.scrollTop = tapeEl.scrollHeight;
+  signinEl.hidden = speech;
   radio.hidden = !showTape || !tape.length;
   paintBar();
   measure();
@@ -1097,7 +1116,11 @@ function paintBar(){
   playBtn.textContent = playing ? '❙❙' : '▶';
   playBtn.setAttribute('aria-label', playing ? 'Pause' : 'Play');
   paintTime();
-  liveBtn.hidden = follow;
+  /* Away from the radio two ways -- replaying an earlier line, and paused --
+     and the way back must be on screen for both. Hidden on `follow` alone, a
+     pause offered no route to the present except playing out the clip it
+     stopped on. */
+  liveBtn.hidden = follow && !userPaused;
   liveBtn.textContent = queue.length ? `▸ live · ${queue.length} waiting` : '▸ live';
   autoBtn.classList.toggle('blocked', autoPlay && blocked);
   rwho.className = 'who' + (blocked || gone ? ' warn' : '') + (blocked ? ' note' : '');
@@ -1120,8 +1143,9 @@ function paintBar(){
                     ? `replaying${part} · ${queue.length} waiting — press L for live`
                     : `replaying${part || ' an earlier transmission'} — press L for live`)
     : userPaused && au.currentSrc
-               ? (queue.length ? `paused · ${queue.length} waiting — press space to carry on`
-                               : 'paused — press space to carry on')
+               ? (queue.length
+                    ? `paused · ${queue.length} waiting — space carries on, L rejoins the radio`
+                    : 'paused — space carries on, L rejoins the radio')
     /* With two calls running, a voice with no name on it is worse than
        silence: you cannot tell whether the fire or the medical run is the one
        being talked about. So the clip is attributed whenever there is any
@@ -1263,10 +1287,16 @@ function radioSync(){
   paintBar();
 }
 
-/* Back to the present. Whatever stacked up while you were reading back plays
-   in the order it was said, oldest first, because that is the conversation. */
+/* Back to the present, from either way of having left it: replaying an earlier
+   line, and a deliberate pause. Both are states the radio is not allowed to
+   talk over, so both need the one control that hands the room back. Without
+   that, pause is a dead end -- the only way out is to play whatever you
+   stopped on and wait for it to end, which is not a thing to ask of somebody
+   who paused because they wanted the room quiet. Whatever stacked up meanwhile
+   plays in the order it was said, oldest first, because that is the
+   conversation. */
 function goLive(){
-  if(follow) return;
+  if(follow && !userPaused) return;
   follow = true; userPaused = false;
   au.pause();          /* the point of the control is to leave the past now */
   if(blocked) retryBlocked(); else pump();
@@ -1425,95 +1455,7 @@ addEventListener('mousemove', () => {
   idle = setTimeout(() => document.body.classList.remove('pointer'), 2500);
 });
 
-/* ---------- data ----------------------------------------------------------
-   The demo carries its ETAs and statuses as offsets in seconds from the moment
-   you press space, not as instants, because the demo call is stamped then. It
-   is worth the few lines: without them the file:// copy never renders the ETA
-   line at all, and the ETA line is the half of this screen most likely to say
-   something it cannot back up. One entry per state it can be in. */
-const DEMO = [
-  {dept:'West Lafayette FD', type:'Structure Fire',        address:'340 Sagamore Parkway West', city:'West Lafayette', units:['E2','E3','L1','BC1'],
-   eta:{scene:170, station:'WLFD Station 2'},
-   transcript:'Engine 2, Engine 3, Ladder 1, Battalion 1, respond to 340 Sagamore Parkway West for a reported structure fire, smoke showing from the second floor.'},
-  {dept:'Purdue FD',         type:'Medical: Chest Pain',   address:'Cary Quadrangle',           city:'Purdue campus',  units:['M2','E11'],
-   eta:{scene:95, station:'Purdue FD', pass:35, near:210},
-   status:{state:'enroute', at:-40, text:'Medic 2 en route'},
-   transcript:'Medic 2, Engine 11, respond to Cary Quadrangle for a 60 year old male, chest pain, conscious and breathing.'},
-  {dept:'West Lafayette FD', type:'Vehicle Crash',         address:'US-231 at Airport Road',    city:'West Lafayette', units:['E2','M2','L1'],
-   eta:{scene:-15, station:'WLFD Station 3'},
-   transcript:'Engine 2, Medic 2, Ladder 1, respond to US-231 at Airport Road, two vehicle personal injury accident, one party still in the vehicle.'},
-  {dept:'Purdue FD',         type:'Automatic Fire Alarm',  address:'Wetherill Laboratory',      city:'Purdue campus',  units:['E11'],
-   eta:{scene:-200, station:'Purdue FD'},
-   transcript:'Engine 11, respond to Wetherill Laboratory for an automatic fire alarm activation, third floor pull station.'},
-  {dept:'Tippecanoe County Fire', type:'Carbon Monoxide Alarm', address:'1820 Cumberland Avenue', city:'West Lafayette', units:['E3'],
-   eta:{scene:-90, station:'WLFD Station 1'},
-   status:{state:'on_scene', at:-70, text:'Engine 3 on scene'},
-   transcript:'Engine 3, respond to 1820 Cumberland Avenue for a carbon monoxide alarm activation, no one reporting symptoms.'},
-  /* The EMS transport tail, which is where a call actually ends. "Medic 16 is
-     going to be en route to IU" is the medic leaving the scene with a patient,
-     and the state is attributed to the unit that said it. */
-  {dept:'Purdue FD', type:'Medical: Chest Pain', address:'Cary Quadrangle', city:'Purdue campus', units:['M16','E11'],
-   started:410, eta:{scene:150, station:'Purdue FD'},
-   status:{state:'transporting', at:350, text:'Dispatch, Medic 16 is going to be en route to IU.'},
-   transcript:'Medic 16, Engine 11, respond to Cary Quadrangle for a 60 year old male, chest pain, conscious and breathing.'},
-  /* And "Medic 16 has arrived at IU" -- the transmission that used to put a
-     confident "on scene" on the wall while the medic was in an ER across town. */
-  {dept:'Purdue FD', type:'Medical: Fall', address:'Earhart Hall', city:'Purdue campus', units:['M16'],
-   started:520, eta:{scene:140, station:'Purdue FD'},
-   status:{state:'at_hospital', at:430, text:'Dispatch, Medic 16 has arrived at IU.'},
-   transcript:'Medic 16, respond to Earhart Hall for a fall victim, conscious and breathing.'},
-  /* The parser heard where and not what: no type, so the address takes the
-     headline. This state exists in the demo because it is the one that used to
-     put the word "Dispatch" on the wall over a half-heard address. */
-  {dept:'West Lafayette FD', address:'2100 Yeager Road', city:'West Lafayette', units:['E3'],
-   eta:{scene:75, station:'WLFD Station 3'},
-   status:{state:'enroute', at:-25, text:'Engine 3 en route'},
-   transcript:'Engine 3 respond to 2100 Yeager Road, cross street Salisbury Street, caller is not answering the callback.'},
-  /* Three at once, newest first, which is the state this display could not
-     show at all until now: the second dispatch used to overwrite the first and
-     the fire left the screen with nobody told. `started` ages each one back
-     from the moment you press space. */
-  [{dept:'Purdue FD',         type:'Medical: Chest Pain',   address:'Cary Quadrangle',           city:'Purdue campus',  units:['M2','E11'],
-    started:25, eta:{scene:110, station:'Purdue FD'},
-    transcript:'Medic 2, Engine 11, respond to Cary Quadrangle for a 60 year old male, chest pain, conscious and breathing.'},
-   {dept:'West Lafayette FD', type:'Structure Fire',        address:'340 Sagamore Parkway West', city:'West Lafayette', units:['E2','E3','L1','BC1'],
-    started:260, eta:{scene:150, station:'WLFD Station 2'},
-    status:{state:'on_scene', at:165, text:'Engine 2 on scene, smoke showing'},
-    transcript:'Engine 2, Engine 3, Ladder 1, Battalion 1, respond to 340 Sagamore Parkway West for a reported structure fire, smoke showing from the second floor.'},
-   {dept:'Tippecanoe County Fire', type:'Carbon Monoxide Alarm', address:'1820 Cumberland Avenue', city:'West Lafayette', units:['E3'],
-    started:620, eta:{scene:190, station:'WLFD Station 1'},
-    status:{state:'clear', at:560, text:'Engine 3 clear, in service'},
-    transcript:'Engine 3, respond to 1820 Cumberland Avenue for a carbon monoxide alarm activation, no one reporting symptoms.'},
-   /* And a typeless one in the list, to show that a row titled by its address
-      is set as an address there too rather than dressed as a category. */
-   {dept:'West Lafayette FD', address:'2100 Yeager Road', city:'West Lafayette', units:['E3'],
-    started:480, eta:{scene:150, station:'WLFD Station 3'},
-    status:{state:'on_scene', at:230, text:'Engine 3 on scene'},
-    transcript:'Engine 3 respond to 2100 Yeager Road, cross street Salisbury Street.'}],
-  /* One channel grant, two transmissions -- the state this file could not show
-     at all until the server learned to split a record. "Dispatch 16, that is a
-     negative." and the "Clear, thank you." answering it are one Broadcastify
-     record, one mp3, and they used to arrive here as a single row with both
-     voices inside it, under one wall clock, reading as one person saying all of
-     it. The last two rows below share a clip id and differ only in their range:
-     two lines, two stamps a couple of seconds apart, two offsets, one download.
-     Nothing groups them, because the whole complaint was that they looked
-     grouped. */
-  {dept:'Purdue FD', type:'Medical: Chest Pain', address:'Cary Quadrangle',
-   city:'Purdue campus', units:['M16','E11'], started:95,
-   eta:{scene:105, station:'Purdue FD'},
-   status:{state:'enroute', at:25, text:'Medic 16 en route'},
-   radio:[
-     {at:0, clip:'11', dispatch:true,
-      text:'Medic 16, Engine 11, respond to Cary Quadrangle for a 60 year old '
-         + 'male, chest pain, conscious and breathing.'},
-     {at:63.98, clip:'12', start:0.58, end:3.11, play_start:0.33, play_end:3.36,
-      text:'Dispatch 16, that is a negative.'},
-     {at:66.82, clip:'12', start:3.42, end:4.52, play_start:3.17, play_end:4.77,
-      text:'Clear, thank you.'}]},
-  null,        // idle
-  'error',     // error
-];
+/* ---------- data ---------------------------------------------------------- */
 
 /* The transcript with no clip behind it: mock dispatches carry no audio, and
    neither does a source running without an archive. The line is still worth
@@ -1549,65 +1491,6 @@ function callsFrom(j){
   }).filter(c => at - lastHeard(c) <= FADE_AFTER * 1.5);
 }
 
-/* One demo entry into the shape a real payload has. The offsets are relative
-   because the demo call is stamped when you press space, not when the file was
-   written. */
-function demoCall(d, n, now){
-  const ts = now - (d.started || 0);
-  const c = {...d, id:'demo'+n, ts};
-  if(d.eta) c.eta = {
-    station:d.eta.station, scene_at:ts + d.eta.scene, estimated:true,
-    passes_you:d.eta.pass != null,
-    pass_at:d.eta.pass != null ? ts + d.eta.pass : null,
-    closest_metres:d.eta.near};
-  if(d.status) c.status =
-    {state:d.status.state, ts:ts + d.status.at, text:d.status.text};
-  /* A demo entry may spell its transmissions out one by one, which is the only
-     way to show from file:// what the server now sends: several rows off one
-     record, each carrying its own range into it. None of them gets a url --
-     there is no audio in the demo, and giving these rows one would take the
-     space bar away from cycling the states, which is the only way to reach
-     them. `at` is seconds from this call's dispatch, same as everything else
-     in here. */
-  c.radio = d.radio
-    ? d.radio.map((r, k) => ({id:`demo${n}-${k}`, clip:r.clip ?? null,
-                              ts:ts + r.at, text:r.text, dispatch:!!r.dispatch,
-                              url:null,
-                              start:r.start ?? null, end:r.end ?? null,
-                              play_start:r.play_start ?? null,
-                              play_end:r.play_end ?? null}))
-    : tapeFor(c, null);
-  /* Read off the rows rather than assumed to be the call's own stamp, because
-     with a spelled-out tape they are no longer the same instant -- and the
-     +Xs on every row is measured from the dispatch. */
-  c.radio_start = c.radio.length ? c.radio[0].ts : ts;
-  c.radio_dispatch_ts = (c.radio.find(r => r.dispatch) || {}).ts ?? ts;
-  return c;
-}
-
-function showDemo(i){
-  const d = DEMO[((i % DEMO.length) + DEMO.length) % DEMO.length];
-  focusId = null;                      /* every state starts on its newest */
-  if(d === 'error'){ mode='error'; lastError='HTTP 401 from Broadcastify: check bcfy_api_key';
-                     calls=[]; current=null; }
-  else if(d){
-    mode='call';
-    const stamp = now();
-    calls = (Array.isArray(d) ? d : [d]).map((x, n) => demoCall(x, n, stamp));
-    applyFocus();
-  }
-  else { mode='idle'; calls=[]; current=null; }
-  /* The demo is not the radio: it must not be drawn on top of a feed left over
-     from a server that answered earlier. */
-  feed = [];
-  /* The tape first, so the ages and offsets the screen is about to draw are
-     measured against a conversation that is already in hand. */
-  radioSync();
-  render();
-  modeBtn.hidden = false;
-  modeBtn.textContent = `demo ${((i%DEMO.length)+DEMO.length)%DEMO.length+1}/${DEMO.length}`;
-}
-
 let live = false;
 async function poll(){
   try{
@@ -1620,8 +1503,11 @@ async function poll(){
        happens long after the page loaded. A server too old to send j.now
        leaves SKEW at zero, which is exactly the old behaviour. */
     if(j.now != null) noteSkew(j.now, t0, Date.now()/1000);
-    live = true; modeBtn.hidden = true;
+    live = true;
     if(j.hold_seconds) FADE_AFTER = j.hold_seconds;
+    /* Absent on a server too old to have a gate, which is the same thing as
+       an ungated one: the words are there. */
+    speech = j.speech !== false;
     /* The calls are read even on a source error: the error state owns the
        screen, but the transcript and the audio behind it are still the last
        thing that was heard, and taking them away as well helps nobody. */
@@ -1635,8 +1521,12 @@ async function poll(){
     radioSync();
     render();
   }catch(e){
-    if(live){ live=false; mode='error'; lastError='unreachable'; render(); return; }
-    if(mode === 'boot'){ showDemo(demoIndex); }   /* opened as a file: demo */
+    /* Nothing to fall back on, and that is the point. This used to drop into
+       a demo carrying a fabricated structure fire at a real address, which is
+       a dangerous thing for a fire display to do: a screen that invents a call
+       when it cannot reach its server is worse than a blank one, because a
+       blank one is obviously broken and a burning building is not. */
+    live = false; mode = 'error'; lastError = 'unreachable';
   }
 }
 poll();
@@ -1661,13 +1551,8 @@ addEventListener('keydown', e => {
   if(e.key === 'Escape'){
     e.preventDefault(); focusId = null; focusUntil = 0;
     applyFocus(); showFocusedTape(); return render(); }
-  if(e.code === 'Space'){
-    e.preventDefault();
-    if(live || tape.some(t => t.url)) playPause();
-    else showDemo(++demoIndex);
-  }
+  if(e.code === 'Space'){ e.preventDefault(); playPause(); }
 });
-modeBtn.addEventListener('click', () => showDemo(++demoIndex));
 render();
 </script>
 </body>

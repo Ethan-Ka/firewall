@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>firewall · sign in</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+/* The same tokens as display.html, vendored the same way and for the same
+   reason. This page is deliberately not the display: nothing polls, nothing
+   moves, the cursor is visible and the type is at reading size, because this
+   is the one screen in the program a person is meant to walk up to and use. */
+:root{
+  --n-0:#FFFFFF; --n-100:#EFEDE8; --n-300:#C4C0B5; --n-700:#413E38;
+  --n-800:#2A2825; --n-900:#1A1917;
+  --clay-300:#E8A791; --pine-300:#7ECBBF;
+  --surface:var(--n-900); --border:var(--n-700);
+  --text:var(--n-0); --text-body:var(--n-100); --text-muted:var(--n-300);
+  --font-sans:'IBM Plex Sans','Public Sans',system-ui,sans-serif;
+  --font-mono:'IBM Plex Mono',ui-monospace,monospace;
+  --text-sm:0.9375rem; --text-base:1.0625rem; --text-xl:1.5rem; --text-3xl:2.375rem;
+  --sp-1:.25rem; --sp-2:.5rem; --sp-3:.75rem; --sp-4:1rem;
+  --sp-6:1.5rem; --sp-8:2rem; --sp-12:3rem;
+  --r-md:4px; --dur-fast:140ms; --ease-standard:cubic-bezier(.2,0,0,1);
+}
+*,*::before,*::after{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--surface);color:var(--text-body);font-family:var(--font-sans);
+     font-size:var(--text-base);-webkit-font-smoothing:antialiased;
+     display:grid;place-items:center;padding:var(--sp-6)}
+main{width:100%;max-width:23rem}
+h1{margin:0 0 var(--sp-2);font-size:var(--text-3xl);font-weight:600;
+   letter-spacing:-0.02em;color:var(--text)}
+.lede{margin:0 0 var(--sp-8);color:var(--text-muted);font-size:var(--text-sm);
+      line-height:1.5;max-width:34ch}
+label{display:block;font-size:var(--text-sm);color:var(--text-muted);
+      margin-bottom:var(--sp-1)}
+input{width:100%;padding:var(--sp-3);margin-bottom:var(--sp-4);
+      background:var(--n-800);color:var(--text);
+      border:1px solid var(--border);border-radius:var(--r-md);
+      font-family:var(--font-mono);font-size:var(--text-base)}
+input:focus-visible{outline:2px solid var(--pine-300);outline-offset:2px}
+button{width:100%;padding:var(--sp-3);border:0;border-radius:var(--r-md);
+       background:var(--n-100);color:var(--n-900);
+       font-family:var(--font-sans);font-size:var(--text-base);font-weight:600;
+       cursor:pointer;transition:background var(--dur-fast) var(--ease-standard)}
+button:hover{background:var(--n-0)}
+button:disabled{opacity:.55;cursor:default}
+button:focus-visible{outline:2px solid var(--pine-300);outline-offset:2px}
+/* Reserved whether or not it is showing, so a wrong password does not shove
+   the button out from under the finger that is already moving toward it. */
+#msg{min-height:1.4em;margin:var(--sp-3) 0 0;font-size:var(--text-sm);
+     color:var(--clay-300)}
+footer{margin-top:var(--sp-8);padding-top:var(--sp-4);
+       border-top:1px solid var(--border);
+       font-size:var(--text-sm);color:var(--text-muted);line-height:1.5}
+a{color:var(--pine-300)}
+</style>
+</head>
+<body>
+<main>
+  <h1>firewall</h1>
+  <p class="lede">The display, the log and the audio are open to anyone here.
+     Sign in to read what was said.</p>
+  <form id="f" autocomplete="on">
+    <label for="u">name</label>
+    <input id="u" name="username" autocomplete="username" autocapitalize="none"
+           autocorrect="off" spellcheck="false" required>
+    <label for="p">password</label>
+    <input id="p" name="password" type="password"
+           autocomplete="current-password" required>
+    <button id="go" type="submit">sign in</button>
+  </form>
+  <p id="msg" role="status" aria-live="polite"></p>
+  <footer>Transcripts name people who called 911. Treat them the way you would
+    want yours treated: this is a key to a room, not a link to forward.</footer>
+</main>
+<script>
+/* Where to land afterwards.
+   
+   A path on this server is always allowed, as long as it is a path: "/tracker"
+   yes, "//evil.example" no -- that second one is a URL a browser will happily
+   follow off this host, and ?next= is exactly the field somebody would mail
+   you a doctored copy of.
+
+   A whole URL is allowed only when its origin is one this server already
+   trusts enough to make credentialed reads of it, which is the allow_origins
+   list arriving from /api/session. That is what makes signing in work from a
+   hosted tracker: the page that sent you here is on another domain, and
+   dropping you on this server's display instead would be a dead end. Anything
+   else, and anything at all if that list cannot be read, falls back to "/". */
+const raw = new URLSearchParams(location.search).get('next') || '/';
+const isPath = raw === '/' || /^\/[^/]/.test(raw);
+let next = isPath ? raw : '/';
+
+if(!isPath){
+  fetch('/api/session').then(r => r.json()).then(s => {
+    const allow = Array.isArray(s.origins) ? s.origins : [];
+    try{
+      const u = new URL(raw, location.origin);
+      if(allow.includes(u.origin)) next = u.href;
+    }catch{}
+  }).catch(() => {});
+}
+
+const f = document.getElementById('f'), msg = document.getElementById('msg'),
+      go = document.getElementById('go');
+
+f.addEventListener('submit', async e => {
+  e.preventDefault();
+  go.disabled = true;
+  msg.textContent = '';
+  try{
+    const r = await fetch('/api/login', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({username: f.username.value,
+                            password: f.password.value})});
+    if(r.ok){ location.replace(next); return; }
+    /* One message for a wrong name and a wrong password both, because saying
+       which was wrong tells whoever is guessing which half to keep. */
+    msg.textContent = r.status === 401
+      ? 'That name and password do not match.'
+      : 'Sign-in is not working right now.';
+  }catch{
+    msg.textContent = 'Could not reach the server.';
+  }
+  go.disabled = false;
+  f.password.value = '';
+  f.password.focus();
+});
+document.getElementById('u').focus();
+</script>
+</body>
+</html>

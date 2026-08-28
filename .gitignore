@@ -18,3 +18,10 @@ firewall.egg-info/
 clips/
 incidents/
 corpus.jsonl
+
+# web build toolchain. The tracker's build is not committed: the hosted copy is
+# built by Vercel from web/, and a local one by ./scripts/run-tracker.sh.
+node_modules/
+web/node_modules/
+web/dist/
+.vercel/

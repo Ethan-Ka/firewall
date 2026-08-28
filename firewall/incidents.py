@@ -316,7 +316,11 @@ def reopens(inc, text, ts, state=None, closed=None, dispatch=False):
     # dispatcher says it again -- and a stale repeat must never restart a call.
     if CLOSERS.search(text):
         return False
-    said = set(_parse.by_regex(text).get("units") or [])
+    # The unit extraction on its own, not the whole parser. This used to ask
+    # by_regex for a dict and throw every field of it away but one, which meant
+    # a fuzzy match against every building on campus to find out whether the
+    # word "16" was in the sentence.
+    said = set(_parse.units(text))
     if said & set(inc.get("units") or []):
         return True
     # The address said again, and only when the address is one the parser can
@@ -540,25 +544,143 @@ def load(cfg, which=None):
     return json.loads((dirs[-1] / "incident.json").read_text()) if dirs else None
 
 
-def listing(cfg, limit=20):
-    """Newest incidents first, as (id, opened, dept, type, address, count)."""
+def recording(cfg):
+    """Is anything actually being written to disk on this run?
+
+    Asked because "no calls yet" and "nothing is being kept" look identical from
+    the outside -- both are an empty list -- and they mean opposite things to
+    somebody looking at a screen. incident_dir can be unset, and mock mode sets
+    it to None outright so fiction never lands in the log, so an empty roster is
+    the expected state rather than a fault. The directory has to exist as well as
+    be named: a path pointing at an external disk that is not plugged in is
+    configured and is recording nothing.
+    """
+    root = _root(cfg)
+    return bool(root and root.is_dir())
+
+
+def catalogue(cfg, limit=200):
+    """Newest incidents first, each as a dict of what was filed for it.
+
+    listing() below is the console's view of the same directory and stops at six
+    columns because a terminal line has nowhere to put a unit list. The call
+    tracker in the browser wants the units and the close stamp too, and widening
+    listing()'s tuple to carry them is the one thing that cannot be done here:
+    `firewall --incidents` unpacks those six positionally, so a seventh field
+    turns the oldest reader of this log into a ValueError. The dict is therefore
+    the source and the tuple a slice of it, which is also what stops the two
+    drifting about what "newest" or "count" mean.
+
+    Nothing in here raises on a bad directory, and that is load-bearing rather
+    than defensive: incident.json is rewritten after every transmission, so the
+    newest file on disk is one a call is being written into right now, and a
+    reader that dies on a half-written record is a reader that dies exactly when
+    something is happening.
+    """
     root = _root(cfg)
     if not root or not root.exists():
         return []
+    try:
+        dirs = sorted(root.iterdir(), reverse=True)
+    except OSError:
+        return []
     out = []
-    for d in sorted(root.iterdir(), reverse=True):
+    for d in dirs:
         f = d / "incident.json"
         if not f.exists():
             continue
         try:
             i = json.loads(f.read_text())
+            opened = int(i["opened"])
         except Exception:
+            # Unreadable, truncated, or missing the one field that says when the
+            # call was. Skipped rather than filled in, because `opened` is what
+            # everything downstream sorts on and what core.roster matches a live
+            # call against -- a guessed one would merge two unrelated calls.
             continue
-        out.append((i["id"], i["opened"], i.get("dept"), i.get("type"),
-                    i.get("address"), len(i.get("transmissions", []))))
+        out.append({
+            "id": i.get("id") or d.name,
+            "opened": opened,
+            # None means the radio has not ended this call, which is also what
+            # it means after a reopening: see reopen(), which puts it back.
+            "closed": i.get("closed"),
+            "dept": i.get("dept"),
+            "type": i.get("type"),
+            "address": i.get("address"),
+            "units": list(i.get("units") or []),
+            "count": len(i.get("transmissions") or []),
+        })
         if len(out) >= limit:
             break
     return out
+
+
+def stamp(cfg, ident):
+    """What makes an incident's file the same file it was last time, or None.
+
+    The cheap half of a pair with transmissions() below. catalogue() is read
+    every ten seconds and deliberately leaves the transcripts behind, because
+    they are almost all of the bytes: the 48-transmission call in this archive
+    is a 7KB incident.json of which the six fields the tracker charts are 300
+    bytes. Anything that does want the transcripts therefore has to be able to
+    ask "has this changed" without reading them, and that is this -- one stat
+    per incident, against a file that is only rewritten while its call is
+    running, so the answer is no for every call but the live one.
+
+    Size as well as mtime because a rewrite that lands inside the filesystem's
+    mtime resolution still changes the length: incident.json is written whole
+    after every transmission, and a transmission always adds a row.
+    """
+    root = _root(cfg)
+    if not root or not ident:
+        return None
+    try:
+        st = (root / ident / "incident.json").stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+def transmissions(cfg, ident):
+    """Every transmission filed for one incident, oldest first, with its stamp.
+
+    Returns (stamp, rows), or (None, None) when there is nothing on disk to
+    read -- which is not the same answer as an incident that has no
+    transmissions, and callers that draw "nothing was said" differently from
+    "we cannot see what was said" need the difference.
+
+    The stamp comes back from AFTER the read rather than from before it, so the
+    pair is always describing one state of the file: a call being written into
+    while this runs hands back rows that go with the stamp they were read at,
+    and a caching caller re-reads on its next poll instead of remembering newer
+    rows under an older file's name. Unreadable is not an error here for the
+    reason catalogue() gives -- the newest file on disk is one a call is being
+    written into right now.
+    """
+    root = _root(cfg)
+    if not root or not ident:
+        return None, None
+    f = root / ident / "incident.json"
+    try:
+        body = f.read_text()
+        st = f.stat()
+    except OSError:
+        return None, None
+    try:
+        rows = json.loads(body).get("transmissions") or []
+    except Exception:
+        return None, None
+    return (st.st_mtime_ns, st.st_size), rows
+
+
+def listing(cfg, limit=20):
+    """Newest incidents first, as (id, opened, dept, type, address, count).
+
+    Six wide and staying six wide -- `firewall --incidents` unpacks this
+    positionally. Anything that wants more of the record calls catalogue().
+    """
+    return [(i["id"], i["opened"], i["dept"], i["type"], i["address"], i["count"])
+            for i in catalogue(cfg, limit)]
 
 
 def replay(cfg, which=None, play=False):

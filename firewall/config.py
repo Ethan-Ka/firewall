@@ -5,10 +5,18 @@ from pathlib import Path
 # Talkgroups on the Tippecanoe County Government P25 system (RadioReference sid 9099).
 # All fire/EMS talkgroups on this system are unencrypted.
 #
-# The default watches West Lafayette only. Each talkgroup is polled as its own
-# server-side-filtered `groups` request, so you are billed for records from the
-# departments you asked for and nothing else. Adding the county-wide talkgroups
-# below is a real cost decision, not a free one: see COUNTY_FIRE.
+# The default watches Purdue FD and nothing else. Each talkgroup is polled as
+# its own server-side-filtered `groups` request and Broadcastify bills per
+# record read, so the list is the bill: every department added here is another
+# department's whole day of traffic being downloaded and transcribed. Adding one
+# is a cost decision, not a preference, which is why the others are kept below
+# as data rather than left in the default.
+PURDUE_FIRE = {
+    2105: "Purdue FD",
+}
+
+# West Lafayette city fire. On the same system and the obvious first addition,
+# and deliberately not in the default: it roughly doubles the record count.
 WEST_LAFAYETTE_FIRE = {
     2021: "West Lafayette FD",
     2105: "Purdue FD",
@@ -54,7 +62,7 @@ DEFAULTS = {
     "trunk_dir": "./trunk-out",
 
     # --- shared ------------------------------------------------------------
-    "talkgroups": WEST_LAFAYETTE_FIRE,
+    "talkgroups": PURDUE_FIRE,
     "poll_seconds": 5,
     # small.en is the floor that reliably handles 8kHz trunked radio: base.en
     # turns "Purdue" into "Pretty" and "Earhart" into "your heart" often enough
@@ -93,6 +101,62 @@ DEFAULTS = {
     # How close the run has to come to count as "you would hear it". 600m
     # covers the surrounding streets, not just your own.
     "siren_metres": 600,
+
+    # --- who may read the transcripts --------------------------------------
+    # Empty means nothing is gated and there is no login, which is the right
+    # default for one screen on one wall on one network. Fill it in and the
+    # words come off every page until somebody signs in; everything else --
+    # call type, address, units, ETA, the audio itself -- stays public. See
+    # auth.py for why that is the line, and `firewall --invite NAME` for how
+    # to make an entry.
+    #   FIREWALL_USERS=alex:reed-tumbler-42,sam:kiln-oxbow-9
+    "users": {},
+    # Signing key for the session cookie. Unset derives one from the
+    # credentials above, so sessions survive a restart and every session ends
+    # the moment you edit the list. See auth._secret.
+    "session_secret": None,
+    "session_days": 30,
+
+    # --- who may read the API from another origin ---------------------------
+    # Exact origins, comma-separated, allowed to make credentialed reads of
+    # /api from a page they serve. Empty -- the default -- means nobody, which
+    # is right for a screen on the same network as the server: same-origin
+    # requests never involve this list.
+    #
+    # Fill it in when the tracker is hosted somewhere else, naming the hosted
+    # origins and nothing more:
+    #   FIREWALL_ALLOW_ORIGINS=https://tracker.example.com,https://tracker-git-main-you.vercel.app
+    # Every origin here can read everything the browser of anyone signed in to
+    # this server can read, so a wildcard is not offered and Vercel's preview
+    # deployments each need naming rather than a pattern. Setting this also
+    # moves the session cookie to SameSite=None; Secure, which needs HTTPS in
+    # front of this server -- see _cookie in __main__.
+    "allow_origins": [],
+
+    # --- pushing to a hosted tracker ---------------------------------------
+    # The other way to connect a hosted tracker, and the one that needs nothing
+    # opened up: this machine posts a snapshot outward every few seconds and
+    # the hosted half keeps the last day of it. See push.py and web/api/.
+    #
+    # Unset means no push, which is the default. Both of the first two are
+    # needed: a url with no token is a write the far end will refuse for ever.
+    "push_url": None,                # https://your-project.vercel.app/api/push
+    "push_token": None,              # the same secret as FIREWALL_PUSH_TOKEN there
+    "push_seconds": 10,
+    # How much of the log goes up. The far end expires a snapshot after its own
+    # RETAIN_HOURS whatever this says, so the two want to agree.
+    "push_hours": 24,
+    # This machine's public origin, if it has one. Used for two things and
+    # needed for neither: it makes the hosted page's play buttons point back at
+    # the audio, and it gives "sign in" somewhere to go. Unset -- the normal
+    # case for a machine behind a router -- and the hosted page shows the calls
+    # with the audio visibly unavailable.
+    "public_url": None,
+    # Push the words even though FIREWALL_USERS is set. Off, and deliberately
+    # awkward to turn on: the gate exists because somebody decided the
+    # transcripts are not for everybody, and a public URL is the last place to
+    # undo that by accident.
+    "push_speech": False,
 }
 
 
@@ -123,6 +187,16 @@ ENV_KEYS = {
     "FIREWALL_PORT": "port",
     "FIREWALL_HOME": "home",
     "FIREWALL_SIREN_METRES": "siren_metres",
+    "FIREWALL_USERS": "users",
+    "FIREWALL_SECRET": "session_secret",
+    "FIREWALL_SESSION_DAYS": "session_days",
+    "FIREWALL_ALLOW_ORIGINS": "allow_origins",
+    "FIREWALL_PUSH_URL": "push_url",
+    "FIREWALL_PUSH_TOKEN": "push_token",
+    "FIREWALL_PUSH_SECONDS": "push_seconds",
+    "FIREWALL_PUSH_HOURS": "push_hours",
+    "FIREWALL_PUBLIC_URL": "public_url",
+    "FIREWALL_PUSH_SPEECH": "push_speech",
 }
 
 # Read from .env into os.environ by load_dotenv() but intentionally not mapped
@@ -159,6 +233,21 @@ _CASTS = {
     "corpus_path": lambda v: str(Path(v).expanduser()),
     "trunk_dir": lambda v: str(Path(v).expanduser()),
     "whisper_retry": lambda v: v.strip().lower() in ("1", "true", "yes", "on"),
+    "session_days": int,
+    # Origins compared as text against a browser's Origin header, so the
+    # trailing slash a person naturally pastes off the address bar is taken
+    # off here rather than silently failing to match for ever.
+    "allow_origins": lambda v: [o.strip().rstrip("/") for o in v.split(",")
+                                if o.strip()],
+    "push_seconds": int,
+    "push_hours": float,
+    "push_speech": lambda v: v.strip().lower() in ("1", "true", "yes", "on"),
+    # name:password pairs. Split on the FIRST colon only, so a password may
+    # contain one; a comma may not, and the generator never makes one.
+    "users": lambda v: {
+        pair.split(":", 1)[0].strip(): pair.split(":", 1)[1].strip()
+        for pair in v.split(",") if ":" in pair
+    },
     "talkgroups": lambda v: {
         int(pair.split(":", 1)[0].strip()): pair.split(":", 1)[1].strip()
         for pair in v.split(",") if ":" in pair

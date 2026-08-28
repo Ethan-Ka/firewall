@@ -171,9 +171,23 @@ const firstUnlabelled = () =>
    exactly when you were least willing to. */
 const POLL_MS = 4000;
 
+/* The catalogue, and the one place a session that ran out mid-shift is
+   noticed. This page is a transcript editor and has nothing to show without
+   transcripts, so the honest answer to a 401 is the sign-in form, not a poll
+   that fails quietly every four seconds behind a list that stopped updating.
+   The throw is what stops the caller applying an error body as a payload. */
+async function clipsPayload() {
+  const r = await fetch('/api/clips');
+  if (r.status === 401) {
+    location.replace('/login?next=/review');
+    throw new Error('signed out');
+  }
+  return r.json();
+}
+
 async function poll() {
   try {
-    apply(await fetch('/api/clips').then(r => r.json()));
+    apply(await clipsPayload());
   } catch (e) {
     /* A restarting server, or a fetch lost to sleep, is not worth a dead page.
        The next tick picks it up. */
@@ -379,8 +393,10 @@ function select(path) {
   };
   $('#guess').onclick = async e => {
     e.target.textContent = 'transcribing…';
-    const r = await fetch('/api/transcribe', {method:'POST',
-      body: JSON.stringify({path: c.path})}).then(r => r.json());
+    const got = await fetch('/api/transcribe', {method:'POST',
+      body: JSON.stringify({path: c.path})});
+    if (got.status === 401) return location.replace('/login?next=/review');
+    const r = await got.json();
     c.machine = r.text; c.retried = true;
     $('#machine').innerHTML = heard(c);
     wireKeyups();
@@ -405,7 +421,7 @@ async function save(forced) {
   const next = clips[i + 1] ? clips[i + 1].path : c.path;
   /* Render the payload we just fetched rather than the array it replaces --
      that array is a label out of date and possibly a clip short. */
-  apply(await fetch('/api/clips').then(r => r.json()));
+  apply(await clipsPayload());
   select(next);
 }
 

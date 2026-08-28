@@ -413,6 +413,211 @@ def snapshot():
             "radio_dispatch_ts": head["radio_dispatch_ts"] if head else None}
 
 
+# After this long with no close stamp, a filed call is over.
+#
+# The log only stamps `closed` when it hears a closer, and it does not always
+# hear one: the radio steps on the transmission, whisper mangles it, or the
+# phrasing is one CLOSING_PHRASES has not been taught. The archive of
+# 2026-08-20 has a call whose "clearing IU" was not read as a closer at the
+# time, so it sits on disk open, and a tracker that believes the log renders a
+# medical run from a week ago as still running.
+#
+# A day rather than an hour, because a call CAN legitimately run for hours (a
+# structure fire, a long transport tail) and the point of this is to catch
+# records the radio never closed rather than to guess at ones it might still.
+# Nothing that happened yesterday is still happening.
+ASSUME_CLOSED_AFTER = 86400
+
+
+def _assumed_closed(row, now):
+    """Is this filed call over, without the log ever saying so?
+
+    Deliberately does NOT invent a `closed` stamp. The log's stamp is a fact
+    about when the radio ended the call and it is what --replay prints; a
+    fabricated one would be indistinguishable from a heard one the moment it
+    was written down, and would then be wrong by however long the call actually
+    ran. So this is a separate flag: the call is over, and we do not know when.
+
+    Never applied to a live call. Something core still has on the wall is being
+    talked about now, whatever its dispatch timestamp says.
+    """
+    return (not row.get("live") and not row.get("closed")
+            and now - row["opened"] > ASSUME_CLOSED_AFTER)
+
+
+def _never_a_dispatch(row):
+    """Is this filed record not a call at all?
+
+    The archive of 2026-08-20 has four records with no call type, and they are
+    two different things that must not be treated alike. Two are real runs whose
+    type the parser simply does not know: "stand by for a medical run at Stadium
+    and Martin Jischke on an asthma..." and one for a dislocated shoulder. Purdue
+    FD responded to both, and dropping them because TYPE_HINTS has no entry for
+    asthma would be the screen understating the department's own workload.
+
+    The other two are one call's transport leg forked into incidents of its own,
+    from back when anything carrying an address counted as a dispatch: "Medic 16
+    is going to be en route to IU" became a call at "IU", and "Medic 16 is
+    arrived at you" became a call at "you". Nobody was dispatched to either.
+    publish() stopped creating them -- is_hospital takes the first and the
+    address-rank rules take the second -- but the records are still on disk, and
+    the tracker reads the disk.
+
+    So the test is the one the parser already applies to itself: no call type AND
+    a location it cannot stand behind. address_rank is 1 for the fragments an
+    ordinary-chatter capture picks up ("you", "IU", "this time") and 0 for no
+    location at all, and 2 or better for anything a truck could be sent to. That
+    splits those four correctly, and it splits them on evidence rather than on a
+    list of bad strings that would need extending every time whisper invents a
+    new one.
+
+    A live call is never dropped here, whatever it looks like. The wall and the
+    tracker disagreeing about what is happening right now is worse than a bad
+    row, and core's own guards already keep this shape off the wall.
+    """
+    if row.get("live") or row.get("type"):
+        return False
+    where = row.get("address")
+    return _incidents.address_rank(where) <= 1 or _incidents.is_hospital(where)
+
+
+def roster(cfg, limit=200, since=None):
+    """Every call this installation knows about, live and filed, as one list.
+
+    `since` is a unix timestamp: calls that opened before it are left out
+    entirely rather than published and filtered by the reader. A hosted tracker
+    keeping a day of calls asks for a day of calls, so a week of incidents is
+    not read off disk, transcribed into unit states and pushed through a tunnel
+    every ten seconds to be discarded in a browser.
+
+    /api/current publishes the four calls that fit on a wall, which is the right
+    answer for a wall and useless for counting anything: a chart of call types
+    over a shift needs the calls that have already scrolled off it. Those are on
+    disk, the running ones are in memory, and this is the only place the two are
+    put together -- deliberately, because a live call and its own incident are
+    the same call, and a client merging the two lists itself would draw every
+    running call twice.
+
+    Keyed on (dept, opened): the live id is f"{dept}|{int(ts)}" and the incident
+    id is f"{opened}-{slug(dept)}-{slug(type)}" over the same dispatch, so the
+    department and that second are the pair both were built out of. The type
+    cannot be part of the key even though it is in the incident's name, because
+    the log keeps the title the call opened with while the live call is still
+    refining its own.
+
+    Where both exist the live call wins on everything the radio is still
+    changing -- type, address, units, status, eta -- because that is the copy
+    being refined; the incident contributes the two things memory does not have,
+    how many transmissions were actually filed and when the log stamped it
+    closed.
+
+    Every row also carries unit_states, which is the one thing here that costs
+    real work: it is read out of the call's transmissions rather than out of
+    either summary, because "which trucks are still on this" is a question
+    neither the live call nor the catalogue entry can answer -- both of them
+    hold a flat list of designators and one word about the call as a whole. See
+    _states_for for where they are read from and what the read costs.
+    """
+    filed = _incidents.catalogue(cfg, limit)
+    if since is not None:
+        filed = [i for i in filed if i["opened"] >= since]
+    with _lock:
+        # Same order as snapshot(): retire what is over before reading it, under
+        # the lock, because source threads write to these dicts while a handler
+        # thread is serving this.
+        _prune()
+        live = [{"id": c["id"], "dept": c["dept"], "opened": int(c["ts"]),
+                 "closed": _closed_at(c), "type": c.get("type"),
+                 "address": c.get("address"), "city": c.get("city"),
+                 "units": list(c.get("units") or []),
+                 "status": copy.deepcopy(c.get("status")),
+                 "eta": copy.deepcopy(c.get("eta"))} for c in _calls]
+        # Each live call's own conversation off the tape, taken here under the
+        # lock because source threads are appending to it. Only ever used for a
+        # call with no incident to read instead -- mock mode files nothing and
+        # incident_dir can be unset -- but a running call has to be able to say
+        # which of its units have cleared either way. Three fields per row, the
+        # same three the log writes, so _unit_states cannot tell them apart.
+        tape = {(c["dept"], int(c["ts"])):
+                [{"ts": r["ts"], "text": r["text"], "dispatch": r["dispatch"]}
+                 for r in _rows_for(c)] for c in _calls}
+    if since is not None:
+        # The live list too. A call that opened before the window and is still
+        # running is still outside it: `opened` is what every window on the
+        # tracker is measured against, and answering one question by one rule
+        # here and another there is how two panels come to disagree.
+        live = [c for c in live if c["opened"] >= since]
+    calls = {}
+    for i in filed:
+        calls[(i["dept"], i["opened"])] = {
+            "id": i["id"], "incident": i["id"], "dept": i["dept"],
+            "opened": i["opened"], "closed": i["closed"], "type": i["type"],
+            "address": i["address"],
+            # The log has never carried a city: the parser reads one off a
+            # dispatch and only the live call keeps it. Null rather than absent
+            # so the tracker reads one shape for every row.
+            "city": None,
+            "units": i["units"], "count": i["count"], "live": False,
+            # Neither of these survives being written down. The log records what
+            # was said, not the state machine core ran over it, and rebuilding
+            # them out of the transmissions would be a second implementation of
+            # read_status that could disagree with the first.
+            #
+            # unit_states below is read out of those same transmissions and is
+            # not the exception it looks like: it goes through read_status
+            # itself, so there is still only one reader, and it answers a
+            # question the state machine never asked -- where each truck stood,
+            # rather than where the call did. The call's status stays null here
+            # even when every one of its units has cleared, because "the log
+            # never recorded a status for this call" and "the call is over" are
+            # different facts and only the first one is true.
+            "status": None, "eta": None,
+        }
+    for c in live:
+        got = calls.get((c["dept"], c["opened"]))
+        row = {**c, "live": True,
+               # None, not zero: nothing has been filed because there is no log,
+               # and a zero here would draw as a call nobody said a word on.
+               "count": got["count"] if got else None,
+               "incident": got["incident"] if got else None,
+               # The log's stamp is the one the log will still have tomorrow, and
+               # it is what --replay prints. It is only ever absent here when the
+               # call is genuinely still running or when nothing is being
+               # recorded at all, and then the live call's own clear is all there
+               # is to go on.
+               "closed": (got["closed"] if got and got["closed"] is not None
+                          else c["closed"])}
+        calls[(c["dept"], c["opened"])] = row
+    rows = sorted(calls.values(), key=lambda r: r["opened"], reverse=True)[:limit]
+    # Dropped before the transcripts are read, so a record that was never a call
+    # does not also cost a file read every ten seconds.
+    out = [r for r in rows if not _never_a_dispatch(r)]
+    # A day old with no close stamp is over, whether or not the radio was heard
+    # saying so. Flagged rather than stamped: see _assumed_closed.
+    stamped = time.time()
+    for r in out:
+        r["assumed_closed"] = _assumed_closed(r, stamped)
+    # After the sort and the slice, so the transcripts are read for the rows
+    # that are actually being published and not for a tail nobody asked for.
+    for r in out:
+        r["unit_states"] = _states_for(cfg, r, tape.get((r["dept"], r["opened"])))
+    # Anything not on this list will not be asked about again until it comes
+    # back, and then it will be re-read. Racing another handler thread here
+    # costs at worst a recomputation.
+    for k in [k for k in _unit_state_cache if k not in {r["incident"] for r in out}]:
+        _unit_state_cache.pop(k, None)
+    return {"calls": out,
+            # Records the log opened on something that turned out not to be a
+            # dispatch. Counted rather than quietly dropped: a list shorter than
+            # the directory it was read from has to say so somewhere.
+            "not_dispatches": len(rows) - len(out),
+            # Whether anything is being written down at all, which is not the
+            # same question as whether there are any calls: see
+            # incidents.recording.
+            "logged": _incidents.recording(cfg),
+            "now": time.time()}
+
+
 def set_purdue(info):
     """Latest Purdue campus status, or None when the watcher is off.
 
@@ -691,6 +896,161 @@ def read_status(text):
     # transmission that used to hand the address slot the word "hospital" -- and
     # reading it as an arrival somewhere the call is not is the point.
     return "at_hospital" if hospital else None
+
+
+# --------------------------------------------------------- per-unit status
+# The status above is one word for a whole call, which is what a wall needs and
+# the wrong answer to "which of these trucks is still on it". The Earhart
+# alcohol run of 2026-08-21 is the case: three units worked it, one of them
+# transported a patient to a hospital and went in service fifty minutes in, and
+# the call was still running. No single word says that. So the same
+# transmissions are read again here, per unit rather than per call.
+#
+# The two are allowed to disagree, and that is the point rather than a defect to
+# tidy up. The incident at 1787205904 is a call whose only unit is plainly clear
+# -- "Dispatch, Medic 16 is clearing IU" -- and whose own record says it never
+# closed, because it was filed before CLOSERS had learned that a crew leaving
+# the hospital is the end of an EMS call. Reading the transcript today gets the
+# unit right and must not go back and restate the call, which is a record of
+# what was written down at the time. "Every unit has cleared" and "the log
+# closed this call" are separate claims about separate evidence, and a screen
+# showing both is a screen that can show where they came apart.
+def _unit_states(units, rows, address=None):
+    """Where the radio last put each of `units`, one entry per unit, in order.
+
+    `rows` is the call's transmissions oldest first, each {ts, text, dispatch}.
+    That is the shape the incident log files and the shape the tape holds, and
+    this deliberately cannot tell which it was handed: a live call in mock mode
+    has no incident on disk and still has to be able to say which of its units
+    have cleared.
+
+    A unit nobody has said a word about comes back "dispatched" with a null ts
+    and text rather than being left out. It was toned out; that is a fact about
+    that truck and not an absence of one, and a card listing four units above
+    three states is a card missing a truck.
+    """
+    seen = {u: {"unit": u, "state": "dispatched", "ts": None, "text": None}
+            for u in units}
+    for r in rows:
+        text = (r.get("text") or "").strip()
+        # A dispatch never asserts a status, exactly as in publish(). It is not
+        # a scruple: this archive's tone-outs read "Purdue Fire, Medic 16, en
+        # route to Third and Jischke for a possible alcohol poisoning", which is
+        # the dispatcher sending a truck that has not keyed up yet. Read as a
+        # status it would put every unit on a call en route the instant the tones
+        # dropped, which is the one thing this field exists to distinguish. The
+        # known cost is that a real self-report the parser misread as a dispatch
+        # is skipped with them: Engine 11's own "Dispatch, Engine 11, en route,
+        # to Earhart" carried an address, was filed as a dispatch, and is why
+        # E11 reads "dispatched" on the Earhart run for a call it did answer.
+        # Losing one en route is cheaper than inventing three.
+        if not text or r.get("dispatch"):
+            continue
+        # Only the units this transmission names move. Nothing else is knowable:
+        # "we're on scene" with no designator in it is a truck reporting itself
+        # and there is no way to say which truck, so it moves nobody.
+        said = [u for u in _parse.units(text) if u in seen]
+        if not said:
+            continue
+        # read_status is the only reader, and not one piece of it is re-tested
+        # here. Asking _ARRIVED_RE directly is the obvious way to write this and
+        # it is wrong: "Engine 11, respond to Earhart, we'll advise on scene"
+        # names a unit and says "on scene" and is an instruction about the
+        # future, and it is _NOT_ARRIVED_RE behind read_status that refuses it.
+        # The other half of the line read_status draws, _self_reported, is
+        # already spent by the time we get here -- naming one of `units` IS its
+        # unit test -- but going through the front door is what guarantees the
+        # two can never come apart.
+        #
+        # incidents.CLOSERS needs no second test for the same reason: read_status
+        # asks it first, ahead of everything else, so a closing transmission
+        # arrives here as "clear" already and a second copy of the closing
+        # phrases in this file would be one more thing to drift.
+        state = read_status(text)
+        if not state:
+            continue
+        ts = float(r["ts"])
+        for u in said:
+            at = seen[u]
+            if at["state"] == "clear":
+                # THE exception to the monotonic rule, and the same one
+                # _bring_back documents for the call: the guard below exists so
+                # a second unit's stale "en route" cannot un-arrive a truck, and
+                # a unit that cleared and is now reporting a position again is
+                # not that -- it is a later report about a later stretch of the
+                # call. So it takes the same named evidence test rather than a
+                # hole in the guard, asked here about one unit's own close
+                # instead of the call's: incidents.reopens wants a position
+                # (never a closer), inside REOPEN_WINDOW, from a unit that was
+                # on this call, which naming one of `units` is.
+                if not _incidents.reopens({"units": units, "address": address},
+                                          text, ts, state, closed=at["ts"]):
+                    continue
+            elif _STATUS_RANK[state] <= _STATUS_RANK[at["state"]]:
+                continue
+            # Trimmed to 160 for the reason the call status is: whisper
+            # occasionally hands back a paragraph, and this rides on a payload
+            # that carries one of these per unit per call.
+            at.update(state=state, ts=ts, text=text[:160])
+    return [seen[u] for u in units]
+
+
+# What _states_for last worked out for an incident, keyed on the file it read.
+# Bounded to the incidents the last roster() actually asked about, which is
+# `limit` of them: a process that runs for months would otherwise accumulate an
+# entry per call it ever saw.
+_unit_state_cache = {}
+
+
+def _states_for(cfg, row, tape):
+    """One roster row's unit_states. Off disk where there is a log, else the tape.
+
+    What this costs is the whole reason it is written this way. catalogue()
+    walks the incident directory every ten seconds and leaves the transcripts
+    behind because they are almost all of the bytes; a per-unit state means
+    reading them after all, and reading and re-reading 200 of them on every poll
+    is not something to hide inside a page refresh.
+
+    So the answer is cached per incident against incidents.stamp() -- the file's
+    mtime and size -- and an incident.json is only ever rewritten while its call
+    is still running. A poll therefore costs one stat() per filed call and a
+    full read of only the ones that changed, which in practice is the live one.
+    Measured on this machine against a directory of 200 copies of the
+    48-transmission Earhart run, 9600 transmissions in all: roster() is 14ms
+    warm where catalogue() on its own is 13ms, so the unit states of two hundred
+    calls cost about a millisecond a poll. With the cache defeated the same call
+    is 43ms every ten seconds, and the first poll of a process, which has 200
+    files nobody has read yet, is 48ms once.
+
+    The units and the address are in the key beside the stamp, because a live
+    call gains units off the radio while its file on disk sits still, and a
+    stale answer would then be a card missing a truck.
+
+    The cached list is built once and never written to afterwards, so two
+    handler threads may be served the same object.
+    """
+    units = row["units"]
+    if not units:
+        # Nothing was dispatched, so there is nothing to read a state for, and
+        # the two meanings of the empty list coincide rather than conflict.
+        return []
+    ident = row.get("incident")
+    address = row.get("address")
+    if ident:
+        st = _incidents.stamp(cfg, ident)
+        got = _unit_state_cache.get(ident)
+        if st and got and got[0] == (st, tuple(units), address):
+            return got[1]
+        st, rows = _incidents.transmissions(cfg, ident)
+        if rows is not None:
+            states = _unit_states(units, rows, address)
+            if st:
+                _unit_state_cache[ident] = ((st, tuple(units), address), states)
+            return states
+    # No log, or a log that could not be read this time round. The tape is the
+    # other place the transmissions are, and for a live call in mock mode or
+    # with incident_dir unset it is the only one.
+    return _unit_states(units, tape, address) if tape is not None else []
 
 
 def _live_call(dept, ts, cfg):

@@ -1,0 +1,23 @@
+# What Vercel is allowed to see, which is the tracker and nothing else.
+#
+# Only the front end in web/ is deployable: the collector is a Python process
+# that holds Broadcastify credentials and listens to a scanner, and a
+# datacentre is the wrong place for both. The hosted half of the tracker is
+# three functions in web/api/ that never reach back here -- the radio machine
+# pushes to them.
+#
+# Written as a denylist of everything with web/ carved back out, rather than a
+# list of things to leave behind, because the failure that matters is the one
+# nobody thought to name. A .env with a live push token in it is exactly the
+# file an ignore list forgets, and this way it is never a question.
+#
+# Vercel reads this relative to the project's Root Directory. Set that to `web`
+# -- which is the documented setup -- and this file is not consulted at all; it
+# is here for `vercel deploy` run from the repository root, where without it the
+# whole tree goes up.
+/*
+!/web
+
+# And the two things inside web/ that are made, not written.
+/web/node_modules
+/web/dist

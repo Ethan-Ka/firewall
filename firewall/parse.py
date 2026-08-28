@@ -692,13 +692,32 @@ def _canonical(where):
     return f"{out} {d.group(1).title()}" if d else out
 
 
-def by_regex(text):
-    units, seen = [], set()
+def units(text):
+    """Every unit that transmission names, in the order it named them.
+
+    Lifted out of by_regex() and made public because it was being asked for on
+    its own: the incident log tests which units a transmission mentions, and the
+    call tracker needs to know which truck each "on scene" was about. Both used
+    to reach it through by_regex, which is the whole parser -- ADDR_RE, the
+    landmark capture, the gazetteer and a fuzzy match against every building on
+    campus -- to read six characters out of the front of a sentence.
+
+    It stays one function rather than one per caller because the alternative is
+    two regexes that disagree about what "Medic 16" is called. spoken_numbers()
+    folds "engine two" to "engine 2" first, and _unit() normalises to the short
+    designator, so what comes back here is exactly what is in a call's `units`
+    and can be compared to it directly.
+    """
+    out, seen = [], set()
     for m in UNIT_RE.finditer(spoken_numbers(text)):
         u = _unit(m.group(1))
         if u not in seen:
             seen.add(u)
-            units.append(u)
+            out.append(u)
+    return out
+
+
+def by_regex(text):
     # "Medic 17, respond to Wiley dining court" is not 17 Wiley Dining Court:
     # "court" is a street suffix, so the house-number pattern happily eats the
     # unit number in front of it.
@@ -724,7 +743,7 @@ def by_regex(text):
     if dest and where and _HOSPITAL.search(where):
         dest = None
     return {
-        "units": units[:6],
+        "units": units(text)[:6],
         "type": next((lab for pat, lab in TYPE_HINTS if re.search(pat, text, re.I)), None),
         "address": where,
         "destination": dest,

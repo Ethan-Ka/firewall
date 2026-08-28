@@ -4,32 +4,6 @@ from collections import deque
 from pathlib import Path
 from . import core, segments as _segments
 
-# --------------------------------------------------------------- mock
-MOCK = [
-    ("West Lafayette FD",
-     "Engine 2, Ladder 1, Battalion 1, respond to 340 Sagamore Parkway West "
-     "for a reported structure fire."),
-    ("Purdue FD",
-     "Medic 2, Engine 11, respond to Cary Quadrangle for a 60 year old male, chest pain."),
-    ("West Lafayette FD",
-     "Engine 2, Medic 2, Ladder 1, respond to 1820 Cumberland Avenue, "
-     "personal injury accident."),
-    ("Tippecanoe County Fire",
-     "Engine 3, respond to 415 North River Road for a carbon monoxide alarm activation."),
-]
-
-
-def mock(cfg):
-    print("[mock] synthetic dispatch every 45s. No credentials, no audio.")
-    i = 0
-    while True:
-        dept, text = MOCK[i % len(MOCK)]
-        core.publish(dept, text, time.time(), cfg)
-        core.report_ok()
-        i += 1
-        time.sleep(45)
-
-
 # --------------------------------------------------------------- trunk-recorder
 def trunk(cfg):
     """Watch a trunk-recorder output dir for new call WAVs + .json sidecars."""
@@ -461,4 +435,11 @@ def broadcastify(cfg):
         time.sleep(interval)
 
 
-ALL = {"mock": mock, "trunk": trunk, "broadcastify": broadcastify}
+# No mock source. There was one, generating a dispatch every 45 seconds so the
+# display could be worked on without credentials, and it was removed because a
+# fabricated structure fire is not a harmless placeholder on a screen whose
+# whole purpose is telling somebody what is actually on fire. The cost of
+# keeping it was a wall display that could not be trusted at a glance, and a
+# fake call that reached the incident log the first time anything ran the
+# server without going through __main__'s guard.
+ALL = {"trunk": trunk, "broadcastify": broadcastify}
