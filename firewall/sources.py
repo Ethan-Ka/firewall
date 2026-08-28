@@ -122,6 +122,74 @@ def _bcfy_params(cfg, pos=None, group=None):
     return p
 
 
+class BcfyBadResponse(Exception):
+    """A Live Calls response that is not a batch of calls.
+
+    Its own class because it is the one failure on this endpoint that does not
+    arrive as an exception already: the socket was fine, the status was 200, and
+    what came back was something else.
+    """
+
+
+def bcfy_reason(e):
+    """One exception, as the sentence to put on the display.
+
+    A class name earns its place in front of a URLError or a KeyError, which
+    otherwise arrive as a bare "timed out" or a bare quoted field name. It is
+    only noise in front of a BcfyBadResponse, which is already a sentence
+    written to be read off a screen.
+    """
+    return str(e) if isinstance(e, BcfyBadResponse) else f"{type(e).__name__}: {e}"
+
+
+def _bcfy_calls(body):
+    """(calls, lastPos) out of one Live Calls response, or raise saying why.
+
+    Shared with the hosted collector rather than written twice, because what the
+    fields are called and what counts as an answer is exactly the kind of thing
+    the two must not drift on.
+
+    The endpoint does not report every failure in the status line. A request it
+    rejects can come back 200 with an `errors` array where the calls should be,
+    and a BCFY_API_BASE aimed at the wrong host can come back 200 with a web
+    page. Both used to land on `body.get("calls") or body.get("data") or []` and
+    become an empty batch, indistinguishable from a quiet talkgroup -- so the
+    poll counted as a success, report_ok() cleared the health flag, and the
+    display sat there with a green light and no calls for as long as the key
+    stayed bad. A source that is failing looked exactly like a source that had
+    nothing to say, which is the one thing the health flag exists to prevent.
+    So anything not recognisable as a batch of calls raises instead, carrying
+    the server's own words where there are any -- report_error() puts the string
+    straight on the screen.
+
+    An empty batch that really is one stays what it always was: a quiet system,
+    not an error.
+    """
+    if isinstance(body, list):
+        return body, None
+    if not isinstance(body, dict):
+        raise BcfyBadResponse(
+            f"Live Calls answered with {type(body).__name__}, not calls -- "
+            f"check BCFY_API_BASE is the bare host (https://api.bcfy.io)")
+    errors = body.get("errors")
+    if errors:
+        # The shape bcfy_check() reads off a 401: [{code, title}, ...].
+        try:
+            said = "; ".join(f"{e.get('code')} {e.get('title')}".strip()
+                             for e in errors) or str(errors)[:160]
+        except Exception:
+            said = str(errors)[:160]
+        raise BcfyBadResponse(f"Live Calls refused the request: {said}")
+    calls = body.get("calls")
+    if calls is None:
+        calls = body.get("data")
+    if not isinstance(calls, list):
+        raise BcfyBadResponse(
+            "no calls in the Live Calls response (keys: "
+            + (", ".join(sorted(map(str, body))) or "none") + ")")
+    return calls, body.get("lastPos")
+
+
 def _bcfy_fetch(cfg, pos=None, group=None):
     """Returns (calls, lastPos)."""
     import requests
@@ -131,11 +199,17 @@ def _bcfy_fetch(cfg, pos=None, group=None):
         headers={"Authorization": f"Bearer {_bcfy_jwt(cfg)}"},
         timeout=20)
     r.raise_for_status()
-    body = r.json()
-    if isinstance(body, list):
-        return body, None
-    calls = body.get("calls") or body.get("data") or []
-    return calls, body.get("lastPos")
+    try:
+        body = r.json()
+    except ValueError:
+        # 200 and not JSON at all -- a proxy's error page, or a host that is
+        # simply not the API. Worth naming, because a decoder's own complaint
+        # about line 1 column 1 says nothing about which of those it was.
+        raise BcfyBadResponse(
+            f"Live Calls answered "
+            f"{r.headers.get('Content-Type') or 'something'} rather than "
+            f"JSON: {r.text[:120]!r}")
+    return _bcfy_calls(body)
 
 
 def _bcfy_normalize(c):
@@ -230,7 +304,10 @@ def bcfy_check(cfg):
                        f"check BCFY_API_BASE is the bare host (https://api.bcfy.io).")
         return 1, f"HTTP {code}: {e.response.text[:200]}"
     except Exception as e:
-        return 1, f"{type(e).__name__}: {e}"
+        # A BcfyBadResponse lands here, and it is the reason --check exists:
+        # a 200 carrying an error object used to print "OK, JWT accepted.
+        # 0 call(s) returned" and send somebody off to debug a quiet talkgroup.
+        return 1, bcfy_reason(e)
 
     print(f"[check] OK, JWT accepted. {len(calls)} call(s) returned, lastPos={last}")
     if calls:
@@ -415,6 +492,7 @@ def broadcastify(cfg):
             print(f"[bcfy] error: {e}", file=sys.stderr)
             time.sleep(interval)
             continue
+        dropped = False
         for rec in calls:
             # Per record, because one malformed record used to abort the whole
             # batch from the outer try -- every sibling behind it in the list
@@ -423,6 +501,7 @@ def broadcastify(cfg):
             try:
                 _bcfy_handle(cfg, rec, seen)
             except Exception as e:
+                dropped = True
                 core.report_error(e)
                 print(f"[bcfy] dropped one record ({type(e).__name__}: {e}); "
                       f"rest of batch continues", file=sys.stderr)
@@ -431,7 +510,12 @@ def broadcastify(cfg):
         # over and over. With lag=0 it is lastPos again, which comes back 0 (or
         # absent) on an empty result set, hence the fallback to the old value.
         pos[g] = max(pos[g], t0 - lag) if lag else (last or pos[g])
-        core.report_ok()
+        # Only when the pass had nothing wrong with it. report_ok() clears what
+        # report_error() just set, so unconditionally, a record that failed lit
+        # the display for the few microseconds between the two lines and never
+        # again -- and a source failing on every record read as healthy.
+        if not dropped:
+            core.report_ok()
         time.sleep(interval)
 
 

@@ -187,16 +187,25 @@ def _jwt(cfg):
 
 
 def fetch(cfg, pos=None, group=None):
-    """One poll. Returns (records, lastPos). Params and auth are sources.py's."""
+    """One poll. Returns (records, lastPos).
+
+    Params, auth, and what counts as an answer are all sources.py's -- reading
+    the response is on the subtle side of this file's split, not the transport
+    side, because a Live Calls failure can arrive as a 200 with an `errors`
+    array in it and the two pollers must agree about that or one of them shows
+    a green light through it.
+    """
     import urllib.parse
     params = sources._bcfy_params(cfg, pos, group)
     url = (f"{cfg['bcfy_api_base']}/calls/v1/live/?"
            + urllib.parse.urlencode(params))
-    body = json.loads(_get(url, {"Authorization": "Bearer " + _jwt(cfg)}) or b"null")
-    if isinstance(body, list):
-        return body, None
-    calls = body.get("calls") or body.get("data") or []
-    return calls, body.get("lastPos")
+    raw = _get(url, {"Authorization": "Bearer " + _jwt(cfg)})
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        raise sources.BcfyBadResponse(
+            f"Live Calls answered with something that is not JSON: {raw[:120]!r}")
+    return sources._bcfy_calls(body)
 
 
 # ------------------------------------------------------------------ one tick
@@ -283,7 +292,7 @@ def tick(cfg, budget):
             calls, last = fetch(cfg, pos[str(g)], g)
             polls += 1
         except Exception as e:
-            error = f"{type(e).__name__}: {e}"
+            error = sources.bcfy_reason(e)
             core.report_error(e)
             print(f"[bcfy] {error}", file=sys.stderr)
             break
@@ -295,7 +304,7 @@ def tick(cfg, budget):
                 if _handle(cfg, rec, seen):
                     published += 1
             except Exception as e:
-                error = f"{type(e).__name__}: {e}"
+                error = sources.bcfy_reason(e)
                 core.report_error(e)
                 print(f"[bcfy] dropped one record ({error})", file=sys.stderr)
         # Forward only, so the cursor can never fall back to the server's
@@ -431,6 +440,32 @@ def render(cfg, error=None):
         archive_error = f"{type(e).__name__}: {e}"
     return {"snapshot": len(log["calls"]), "archived": archived,
             "archive_error": archive_error}
+
+
+def fault(message):
+    """Put a source error on the page. Returns the message, for the caller's body.
+
+    For the runs that end before tick() does anything -- no API key, no
+    transcriber. Those returned 503 to whatever poked the endpoint and wrote
+    nothing at all, so the only reader that ever heard about them was the cron
+    log: the display went on drawing the last good snapshot, green light and
+    all, until the staleness timer in /api/current eventually called the whole
+    radio dead. That is both slower than the truth and vaguer than it.
+
+    Only the health fields are written. The calls and the tape stay exactly as
+    they are, because they are still the last true thing this deployment heard
+    and nothing about a missing key makes them wrong. `pushed_at` moves because
+    it honestly did -- this deployment ran, and is saying so; it is the radio it
+    cannot reach -- and leaving it behind would let the generic staleness line
+    cover up the specific reason sitting right next to it.
+    """
+    snapshot = _redis.get_json(SNAPSHOT_KEY) or {
+        "calls": [], "feed": [], "logged": False, "speech": True,
+        "hold_seconds": 600, "login_url": None,
+    }
+    snapshot.update(ok=False, error=message, pushed_at=time.time())
+    _redis.set_json(SNAPSHOT_KEY, snapshot, ttl=_retain_seconds())
+    return message
 
 
 def prune_all():

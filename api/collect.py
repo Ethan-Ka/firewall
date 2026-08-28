@@ -58,13 +58,18 @@ def run():
     if not _redis.configured():
         return 503, {"error": "no store is connected to this deployment"}
 
+    # Both of these end the run before tick(), and both are written to the
+    # snapshot on the way out rather than only returned here. A 503 is read by
+    # the cron and by nobody else; the page is where somebody is waiting for
+    # calls that are never coming, so the page is where the reason goes.
     cfg = _collector.settings()
     if not cfg.get("bcfy_api_key"):
-        return 503, {"error": "BCFY_API_KEY is not set, so there is no radio "
-                              "to listen to"}
+        return 503, {"error": _collector.fault(
+            "BCFY_API_KEY is not set, so there is no radio to listen to")}
     if not _transcribe.configured(cfg):
-        return 503, {"error": "FIREWALL_STT_KEY is not set, so audio can be "
-                              "fetched but not transcribed"}
+        return 503, {"error": _collector.fault(
+            "FIREWALL_STT_KEY is not set, so audio can be fetched but not "
+            "transcribed")}
 
     out = _collector.tick(cfg, BUDGET)
     # Rendered even when the poll failed. A run that could not reach
