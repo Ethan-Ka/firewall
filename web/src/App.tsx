@@ -9,7 +9,8 @@ import { cn } from '@/lib/utils'
 import {
   type Call, type CurrentPayload, type LogPayload, type Row, type WindowKey,
   MARK, WINDOWS, ago, dayOf, familyOf, inScope, noteSkew, now, reducedMotion,
-  signInHref, skewSeconds, wire, expired, retained, pushedAgo, LOG_PATH,
+  signInHref, skewSeconds, spanWords, wire, expired, retained, pushedAgo,
+  LOG_PATH, HISTORY_PATH, spanOf,
   type Family,
 } from '@/lib/firewall'
 
@@ -25,6 +26,13 @@ import {
  * would. */
 const CURRENT_MS = 2000
 const LOG_MS = 10000
+
+/* And the archive, which is neither of those. /api/history is a month of calls
+ * and it is answered off a cache at the edge; what changes in it between two
+ * reads is a call that /api/log has already put on the screen. Five minutes is
+ * how long a page left open can go on drawing yesterday's boundary before the
+ * word "yesterday" starts to mean the wrong day. */
+const HISTORY_MS = 300000
 
 /* Past this, a pushed copy is old enough to say so in the hazard colour. The
  * far end is what decides whether stale means `ok: false` -- it stamped the
@@ -43,6 +51,10 @@ export default function App() {
      tracker reading a firewall server with nothing in between. */
   const [age, setAge] = useState<number | null>(null)
   const [loginUrl, setLoginUrl] = useState<string | null>(null)
+  /* Everything older than the day /api/log carries, fetched apart from it and
+     merged under it. Empty on a tracker reading a firewall server directly,
+     which has the whole incident log on a disk and answers /api/log with it. */
+  const [history, setHistory] = useState<Call[]>([])
   const [live, setLive] = useState(true)
   const [reached, setReached] = useState(false)
   /* Optimistic until a payload says otherwise, so the rows do not flash
@@ -138,6 +150,36 @@ export default function App() {
     return () => clearInterval(t)
   }, [fetchLog])
 
+  /* The archive. Asked for once and then every few minutes, and abandoned for
+     good on a 404: that is a deployment with no /api/history route at all --
+     the firewall server itself, or a hosted half that predates the archive --
+     and polling it for the life of the tab would be a request a minute that
+     can only ever fail. Anything else is left alone to retry, because a
+     datacentre having a bad moment is not a missing endpoint. */
+  const noArchive = useRef(false)
+  useEffect(() => {
+    let stop = false
+    const pull = async () => {
+      if (noArchive.current) return
+      try {
+        const r = await wire(HISTORY_PATH)
+        if (r.status === 404) { noArchive.current = true; return }
+        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+        const j: { calls?: Call[] } = await r.json()
+        if (stop) return
+        const at = now()
+        setHistory((j.calls ?? [])
+          .map((c) => ({ ...c, units: c.units ?? [], unit_states: c.unit_states ?? [] }))
+          .filter((c) => !expired(c, at)))
+      } catch {
+        /* Held. A month of calls that failed to refetch is a month of calls. */
+      }
+    }
+    pull()
+    const t = setInterval(pull, HISTORY_MS)
+    return () => { stop = true; clearInterval(t) }
+  }, [])
+
   /* Which window the screen opens on, decided once off the first payload.
      Fixing it at 24h is what a default usually is and it is wrong here. This
      gets left running for days and then looked at, and a department that had a
@@ -145,16 +187,34 @@ export default function App() {
      than as accurate. So it opens on the narrowest window that actually
      contains calls, once, and the choice belongs to the room after that. */
   const picked = useRef(false)
-  useEffect(() => {
-    if (picked.current || !log) return
-    picked.current = true
-    const at = now()
-    const fit = WINDOWS.find((w) => log.calls.some((c) => inScope(c, w.key, null, at)))
-    if (fit) setWin(fit.key)
-  }, [log])
 
-  const all = log?.calls ?? []
+  /* The two halves, as one list. The log's copy of a call wins wherever both
+     have it: the archive is written from pushes and is a few minutes behind by
+     design, and a call that is still running is in both -- once as it stood
+     when it was last archived, once as it is now. Merged here rather than in
+     either fetch so neither has to know the other exists, and so a tracker
+     reading a firewall server directly (where history is empty) goes through
+     exactly the same code path as a hosted one. */
+  const all = useMemo(() => {
+    const live = log?.calls ?? []
+    if (!history.length) return live
+    const seen = new Set(live.map((c) => c.id))
+    return [...live, ...history.filter((c) => !seen.has(c.id))]
+  }, [log, history])
   const at = now()
+
+  /* Decided against the merged list and not against the log, and settled only
+     once something is in it. The archive arrives on its own schedule, so the
+     log alone can be empty on a deployment holding three weeks of calls -- and
+     picking off it would fix the screen on an empty day and then never look
+     again, because this only ever runs once. */
+  useEffect(() => {
+    if (picked.current || !all.length) return
+    picked.current = true
+    const on = now()
+    const fit = WINDOWS.find((w) => all.some((c) => inScope(c, w.key, null, on)))
+    if (fit) setWin(fit.key)
+  }, [all])
 
   /* The one place scope is decided, so the chart and the table can never
      describe two different sets of calls. */
@@ -176,16 +236,76 @@ export default function App() {
   const running = scoped.filter((c) => c.live).length
 
   /* The hour of the day this department actually runs, which is the one thing a
-     week of calls knows and a live screen cannot. Ties go to the earlier hour so
-     the figure does not jump between two equal hours on every poll. */
+     week of calls knows and a live screen cannot.
+
+     Counting calls per hour of the day and taking the biggest bin is the
+     obvious version and it is wrong, because the bins are not the same size.
+     A window is a stretch of wall clock with two ragged ends: opened at 14:20
+     over seven days, the 14:00 bin has had eight goes at collecting a call and
+     every other hour has had seven, and an archive that started on Tuesday
+     afternoon gives the afternoon hours a whole extra day over the morning
+     ones. Raw counts read that as "this department is busy at two", when what
+     happened is that we watched two o'clock for longer.
+
+     So each hour is divided by how long it was actually watched, measured by
+     walking the window rather than derived from its length -- because the
+     window's length says nothing about which hours of the day are in it.
+
+     Ties go to the earlier hour, so the figure does not swap between two equal
+     hours on every poll. */
   const busiest = useMemo(() => {
     if (!scoped.length) return null
-    const bins = new Array(24).fill(0)
-    for (const c of scoped) bins[new Date(c.opened * 1000).getHours()] += 1
-    let best = 0
-    for (let h = 1; h < 24; h += 1) if (bins[h] > bins[best]) best = h
-    return { hour: best, n: bins[best] }
-  }, [scoped])
+
+    /* Bounded by the data at the near end as well as by the window. A window
+       that reaches back further than the archive does is mostly a stretch of
+       time nobody was listening to, and counting it as watched would divide
+       every hour by a week of silence. */
+    const span = spanOf(win)
+    const from = Math.max(oldest as number, span === null ? -Infinity : at - span)
+    const calls = new Array(24).fill(0)
+    const watched = new Array(24).fill(0)
+
+    for (const c of scoped) {
+      if (c.opened >= from) calls[new Date(c.opened * 1000).getHours()] += 1
+    }
+    /* Walked in fixed steps and each step charged to the hour its middle falls
+       in, rather than walked from one hour boundary to the next.
+
+       The boundary version is the tidier loop and it hangs twice a year. On the
+       night the clocks go back 01:00 happens twice, and rounding an instant in
+       the second one down to "the start of its hour" lands in the first one --
+       behind where the walk already is. A step that cannot go backwards has no
+       opinion about any of that, and the hour it lands in is whatever the
+       browser says it is, which is the same thing the calls were binned by.
+
+       The step is five minutes until the window is long enough that five
+       minutes is thousands of iterations for no gain: nothing here is measuring
+       to the minute, and the figure it feeds is a call an hour. */
+    const step = Math.max(300, (at - from) / 20000)
+    for (let t = from; t < at; t += step) {
+      const slice = Math.min(step, at - t)
+      watched[new Date((t + slice / 2) * 1000).getHours()] += slice / 3600
+    }
+
+    let best = -1
+    let rate = 0
+    for (let h = 0; h < 24; h += 1) {
+      /* An hour barely watched at all is not a candidate. One call in the six
+         minutes since the archive began is ten an hour, and it would beat every
+         real hour on the board for the rest of the day. */
+      if (watched[h] < 0.25 || !calls[h]) continue
+      const r = calls[h] / watched[h]
+      if (r > rate) { best = h; rate = r }
+    }
+    if (best < 0) return null
+
+    /* How many times that hour came round, which is the count the figure has to
+       be read against: one busy Tuesday and a genuine pattern are the same
+       number on the screen and different claims underneath it. */
+    const days = Math.max(1, Math.round(watched[best]))
+    return { hour: best, n: calls[best], days, rate }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scoped, win, oldest, Math.floor(at / 60)])
 
   /* Whole percentages that add to a hundred. Rounding each share on its own
      leaves 67 + 29 + 3, and three numbers under a bar that visibly fills the
@@ -212,7 +332,7 @@ export default function App() {
   }, [scoped])
   const logged = log?.logged ?? false
   const skew = Math.round(skewSeconds())
-  const retain = retained() ? Math.round((retained() as number) / 3600) : null
+  const retain = retained()
 
   /* A selection that scrolled out of scope is a highlight on nothing. */
   useEffect(() => {
@@ -254,11 +374,28 @@ export default function App() {
             </span>
           </Stat>
 
-          <Stat label="Busiest hour">
+          {/* The note is not decoration. An hour ranked over one day is a
+              coincidence and an hour ranked over a month is a pattern, they
+              print as the same four characters, and this line is the whole of
+              the difference. */}
+          <Stat
+            label="Busiest hour"
+            note={busiest
+              ? `${busiest.n} ${busiest.n === 1 ? 'call' : 'calls'} over `
+                + `${busiest.days} ${busiest.days === 1 ? 'day' : 'days'}`
+              : null}
+          >
             {busiest ? (
               <span className="font-mono text-2xl leading-none font-semibold tabular-nums">
                 {String(busiest.hour).padStart(2, '0')}:00
               </span>
+            ) : scoped.length ? (
+              /* Calls, but not enough of the clock watched to rank an hour
+                 against the others -- a deployment that has been up for twenty
+                 minutes. Distinct from having nothing at all, because the two
+                 look identical on a fresh screen and only one of them is
+                 fixed by waiting. */
+              <span className="text-sm text-muted-foreground">too soon to say</span>
             ) : (
               <span className="text-sm text-muted-foreground">no calls yet</span>
             )}
@@ -316,7 +453,7 @@ export default function App() {
             <span>updated {ago(age)}</span>
           ) : null}
 
-          {retain ? <span>{retain}h of history</span> : null}
+          {retain ? <span>{spanWords(retain)} of history</span> : null}
 
           {!speech ? (
             <a

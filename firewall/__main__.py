@@ -683,8 +683,18 @@ def main():
             # failures otherwise shows up as a hosted tracker that is simply
             # empty, which reads as the radio being quiet.
             try:
-                push.push_once(cfg)
+                answer = push.push_once(cfg) or {}
                 print("            push accepted")
+                # The far end reports this inside a success, because the live
+                # copy landed and only the archive behind it did not. It is
+                # exactly the kind of half-configured deployment this check
+                # exists to catch, so it is not left in a JSON body nobody
+                # reads.
+                if answer.get("archive_error"):
+                    print("            HISTORY NOT KEPT: "
+                          + str(answer["archive_error"]))
+                elif answer.get("archived") is not None:
+                    print(f"            {answer['archived']} records archived")
             except Exception as e:
                 print(f"            PUSH FAILED: {type(e).__name__}: {e}")
         if args.source != "broadcastify":

@@ -8,7 +8,7 @@
  * failure than a fetch that hangs.
  */
 import { createHash, timingSafeEqual } from 'node:crypto'
-import { kvSet, store } from './_store.js'
+import { ARCHIVES, archive, kvSet, pruneAll, store } from './_store.js'
 
 /* Compared as digests rather than as strings so the comparison is over two
  * equal-length buffers whatever was sent -- timingSafeEqual throws on a length
@@ -82,5 +82,49 @@ export default async function handler(req, res) {
   } catch (e) {
     return res.status(502).json({ error: String(e.message || e) })
   }
-  return res.status(200).json({ ok: true, calls: snapshot.calls.length })
+
+  /* The archive, after the snapshot and never instead of it. The snapshot is
+     what the screen is drawing right now and it is the write that must not be
+     held up; the history behind it is a few seconds later either way, and a
+     database having a bad moment should cost a deployment its month-old
+     Tuesdays rather than its live radio.
+
+     `archive` is the calls the sender knows have changed since it last pushed
+     -- usually none, sometimes one -- so the steady state is a write of a few
+     hundred bytes every ten seconds rather than a rewrite of the month. A
+     sender too old to send it falls back to the whole window, which is correct
+     and merely wasteful, and the fallback is what makes this safe to deploy
+     before the machine with the radio on it is updated. */
+  let archived = 0
+  let archiveError = null
+  try {
+    const calls = Array.isArray(body.archive) ? body.archive : body.calls
+    /* The fallback is for a sender too old to have sent a delta, and it is
+       gated on `speech` for the same reason the sender is: rows with the words
+       taken out of them are ids and timings, they are written once per id, and
+       archiving them would leave a month of empty transcript behind whenever
+       somebody later decided the words could be published after all. */
+    const rows = Array.isArray(body.archive_feed) ? body.archive_feed
+      : snapshot.speech ? snapshot.feed : []
+    archived = await archive(ARCHIVES.CALLS, calls)
+    archived += await archive(ARCHIVES.RADIO, rows)
+    /* Pruning walks the indexes by score and is only worth doing when the
+       sender says it has just re-sent everything, which it does every few
+       minutes. Doing it on every push would be a scan for nothing 30 times a
+       minute. */
+    if (body.full === true) await pruneAll(Date.now() / 1000)
+  } catch (e) {
+    archiveError = String(e.message || e)
+  }
+
+  /* 200 with the reason in it, not a 502. The push succeeded -- the live copy
+     is written and the page is current -- and telling the sender it failed
+     would have it print an outage over a working tracker. The sender reports
+     this line separately, in its own words. */
+  return res.status(200).json({
+    ok: true,
+    calls: snapshot.calls.length,
+    archived,
+    archive_error: archiveError,
+  })
 }

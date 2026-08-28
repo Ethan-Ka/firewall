@@ -102,3 +102,175 @@ export const nothing = () =>
   store()
     ? 'no update from the radio in the last day'
     : 'this deployment has no store connected (see web/api/README.md)'
+
+/* ------------------------------------------------------------- the archive
+ *
+ * The snapshot above is a copy of right now, replaced whole every few seconds
+ * and gone a day after the radio machine stops. That is the right shape for
+ * "what is happening", and the wrong one for every question worth asking of a
+ * fire department: which hour it actually runs, whether Tuesdays are quiet,
+ * what a normal week looks like. Those need calls kept past the day they
+ * happened, so they are kept here.
+ *
+ * Two keys rather than one blob, because the access patterns pull in opposite
+ * directions. A hash lets a push write only the calls that CHANGED -- no read
+ * of the archive, no rewrite of it, a few hundred bytes on the wire every ten
+ * seconds instead of the whole history. A sorted set on `opened` lets a read
+ * ask for a span by time and get back exactly the ids in it, so "the last
+ * seven days" costs the last seven days and not the last month.
+ *
+ * The words are kept and the audio is not, which is the one line drawn through
+ * all of this. A day of trunked radio is gigabytes and the clips only ever
+ * exist in the memory of the process that recorded them, so an archived clip
+ * url is a link that outlives what it points at. What is kept is everything
+ * that is still true next month: when a call opened and closed, what it was,
+ * where, who went, what each unit did, and every transmission that was heard,
+ * with what was said in it.
+ */
+
+/** Every archived call, by id, and the same ids by `opened` so a span can be
+ *  asked for by time. */
+const CALLS = { hash: 'firewall:calls', index: 'firewall:calls:at', at: 'opened' }
+
+/** Every archived transmission, the same way, by `ts`.
+ *
+ *  Kept beside the calls rather than inside them because that is how they
+ *  arrive and how they are true: the tape is a record of what was said on a
+ *  talkgroup, and which call a sentence belonged to is a reading of it that the
+ *  parser can get wrong. A row is stored because it was heard. The calls are
+ *  what organise it afterwards, on the way out, by time -- which is the same
+ *  thing _feed() decided upstream and for the same reason. */
+const RADIO = { hash: 'firewall:radio', index: 'firewall:radio:at', at: 'ts' }
+
+export const ARCHIVES = { CALLS, RADIO }
+
+/** How far back the archive goes. Unlike the snapshot's TTL this is enforced
+ *  by pruning rather than by expiry: an archive that vanishes because nobody
+ *  pushed for a month is not an archive. */
+export const ARCHIVE_SECONDS =
+  Math.round(Number(process.env.ARCHIVE_DAYS || 30) * 86400)
+
+/** A ceiling that has nothing to do with time. Retention is the honest bound;
+ *  this one is the one that holds when something upstream goes wrong and starts
+ *  opening a call a second, and it is what keeps a free database free. */
+const MAX_CALLS = 20000
+
+/** The same for the tape, which runs an order of magnitude ahead of it: a call
+ *  is a dozen transmissions on a quiet day and a hundred on a bad one. */
+const MAX_ROWS = 200000
+
+/** Most a single read will return. Well past a month of one department, and
+ *  the difference between a slow page and a function that times out if this
+ *  database is ever pointed at a county. */
+const MAX_READ = 6000
+
+/* Several commands, one round trip. Upstash counts them individually and bills
+ * them individually; what this saves is latency, which is the thing a serverless
+ * function is actually short of. */
+async function pipeline(commands) {
+  const s = store()
+  if (!s) throw new Error('no store is configured for this deployment')
+  if (!commands.length) return []
+  const r = await fetch(s.url + '/pipeline', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${s.token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(commands),
+    cache: 'no-store',
+  })
+  const body = await r.json().catch(() => null)
+  if (!r.ok) throw new Error(body?.error || `store returned HTTP ${r.status}`)
+  const rows = Array.isArray(body) ? body : []
+  const bad = rows.find((x) => x?.error)
+  if (bad) throw new Error(bad.error)
+  return rows.map((x) => x?.result ?? null)
+}
+
+/** A record as it is kept: itself, minus the fields that cannot survive being
+ *  written down.
+ *
+ *  `live` is a claim about the present tense, and a call stored as live stays
+ *  live for ever -- a month-old fire with a pulsing dot on it. The reader takes
+ *  `live` from the snapshot, which is the only thing entitled to an opinion
+ *  about it, and everything the archive holds reads as over.
+ *
+ *  `url` is audio. The clips live in the memory of the process that recorded
+ *  them and are gone long before the words are, so an archived url is a link
+ *  that resolves, returns nothing, and makes a play button that looks fine and
+ *  does nothing. Null is the case the transcript has always drawn correctly:
+ *  the row reads, and the play button is visibly unavailable. */
+const keepable = (c) => {
+  const { live, url, ...rest } = c   // eslint-disable-line no-unused-vars
+  return 'url' in c ? { ...rest, url: null } : rest
+}
+
+/** Write these records into one of the archives above. Idempotent by id, so a
+ *  call pushed again while it is still running lands on top of itself and the
+ *  last version -- the one with the closing time and the full unit list -- is
+ *  the one that is kept. */
+export async function archive(which, records) {
+  const rows = (records || []).filter(
+    (c) => c && typeof c.id === 'string' && Number.isFinite(c[which.at]))
+  if (!rows.length) return 0
+  await pipeline([
+    ['HSET', which.hash, ...rows.flatMap((c) => [c.id, JSON.stringify(keepable(c))])],
+    ['ZADD', which.index, ...rows.flatMap((c) => [String(c[which.at]), c.id])],
+  ])
+  return rows.length
+}
+
+/** Drop what is past retention, and then whatever is over the ceiling.
+ *
+ * Both halves delete from the index first and the hash from what the index
+ * said, which is the order that fails safe: interrupted between the two, the
+ * archive holds a call nothing points at -- invisible, and overwritten the
+ * next time that id is pushed -- rather than an index pointing at a call that
+ * is not there, which every read would then have to defend against. */
+export async function prune(which, cap, at = Date.now() / 1000) {
+  const cutoff = at - ARCHIVE_SECONDS
+  const drop = async (ids) => {
+    if (ids.length) {
+      await pipeline([['ZREM', which.index, ...ids], ['HDEL', which.hash, ...ids]])
+    }
+    return ids.length
+  }
+  let gone = await drop(
+    (await command(['ZRANGEBYSCORE', which.index, '-inf', `(${cutoff}`,
+                    'LIMIT', 0, MAX_READ])) || [])
+  const over = (Number(await command(['ZCARD', which.index])) || 0) - cap
+  if (over > 0) {
+    gone += await drop(
+      (await command(['ZRANGE', which.index, 0, Math.min(over, MAX_READ) - 1])) || [])
+  }
+  return gone
+}
+
+/** Both archives, past retention and over their ceilings. */
+export const pruneAll = async (at = Date.now() / 1000) =>
+  (await prune(CALLS, MAX_CALLS, at)) + (await prune(RADIO, MAX_ROWS, at))
+
+/** The archived calls opened in [from, to], newest first.
+ *
+ *  Newest first is not a presentation choice: it is which end the cap cuts
+ *  from. A span with more calls in it than MAX_READ should come back missing
+ *  the oldest, not missing today. */
+export async function history(which, from, to, limit = MAX_READ) {
+  if (!store()) return []
+  const ids = (await command(['ZREVRANGEBYSCORE', which.index, to, from,
+                              'LIMIT', 0, Math.min(limit, MAX_READ)])) || []
+  if (!ids.length) return []
+  const raw = (await command(['HMGET', which.hash, ...ids])) || []
+  const out = []
+  for (const v of raw) {
+    /* A miss is an id the index still points at and the hash no longer holds.
+       Skipped rather than reported: it is a prune that was interrupted, it
+       heals itself on the next one, and it is not the reader's problem. */
+    if (!v) continue
+    try {
+      out.push(JSON.parse(v))
+    } catch { /* not JSON, so not a call. */ }
+  }
+  return out
+}

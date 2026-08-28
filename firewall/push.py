@@ -14,6 +14,14 @@ seconds behind and always says by how much, which is the honest version of what
 it is -- a copy -- rather than the pretence that a static site in a datacentre
 is listening to a scanner.
 
+The far end also keeps an archive that outlives the snapshot -- the calls
+themselves, so the hosted page can say which hour this department actually runs
+rather than which hour it ran today. That is built from the `archive` list on
+each push: the calls whose contents have changed since the last one, which in
+the steady state is nothing at all. Every `push_full_seconds` the whole window
+goes up instead, flagged `full`, which re-states everything the far end should
+be holding and is what makes a lost write or a replaced database heal itself.
+
 Two things deliberately do not cross:
 
 Audio. A day of trunked radio is gigabytes and the clips only exist in this
@@ -27,7 +35,7 @@ transcripts are not for everybody, and a public URL is the last place to quietly
 undo that. Pushed redacted unless push_speech says otherwise, and the hosted
 page then reads as locked in exactly the way this server's own pages do.
 """
-import json, threading, time, urllib.error, urllib.request
+import hashlib, json, time, urllib.error, urllib.request
 
 from . import auth, core
 
@@ -37,8 +45,30 @@ from . import auth, core
 TIMEOUT = 10
 
 
-def _payload(cfg):
-    """One snapshot, as the far end wants it. Nothing here touches the network."""
+def _fingerprints(calls):
+    """One short digest per call, keyed by id.
+
+    Compared rather than the calls themselves so that what is held between
+    pushes is a few kilobytes of hashes and not a second copy of the log. Sorted
+    keys because a dict that serialises in a different order is not a call that
+    changed, and would have this re-archive the whole window every ten seconds
+    -- which is precisely the cost the delta exists to avoid.
+    """
+    out = {}
+    for c in calls:
+        blob = json.dumps(c, sort_keys=True, default=str).encode()
+        out[c.get("id")] = hashlib.blake2b(blob, digest_size=8).hexdigest()
+    return out
+
+
+def _payload(cfg, seen=None, heard=None, full=True):
+    """One snapshot, as the far end wants it. Nothing here touches the network.
+
+    `seen` is the fingerprints of the calls in the last push and `heard` the ids
+    of the transmissions in it; together they are what turn the archive into a
+    delta. Passing None for either -- which is what `firewall --check` and the
+    first tick of the loop do -- sends the lot.
+    """
     hours = float(cfg.get("push_hours") or 24)
     log = core.roster(cfg, since=time.time() - hours * 3600)
     live = core.snapshot()
@@ -73,23 +103,62 @@ def _payload(cfg):
         # the hosted origin, which has no such route and no such audio, and the
         # player would fail on a click rather than be visibly unavailable.
         row["url"] = base + row["url"] if base and row.get("url") else None
-    return payload
+
+    # What the far end should write down, decided AFTER the redactions above,
+    # so a gated transcript is not archived for ever by the one code path that
+    # was allowed to skip the gate.
+    #
+    # The calls go by fingerprint because a call changes -- it gains units, a
+    # status, a closing time -- and every version of it has to land on top of
+    # the last. The tape goes by id because a transmission does not: what was
+    # said was said, so a row the far end has already been told about is one it
+    # never needs to hear again, and re-sending the ten-minute window every ten
+    # seconds would be the same sentence written down sixty times.
+    marks = _fingerprints(payload["calls"])
+    # A tape with the words taken out is not worth keeping. Redacted rows carry
+    # ids, timings and a dispatch flag and nothing anybody would read, and the
+    # archive is written once per id -- so storing them now would not merely
+    # waste the space, it would be the reason turning the gate off next month
+    # left a month of empty rows behind it. Nothing is archived instead, and the
+    # day speech is allowed through is the day the tape starts.
+    rows = [] if payload.get("speech") is False else payload["feed"]
+    if full or seen is None or heard is None:
+        payload["archive"] = payload["calls"]
+        payload["archive_feed"] = rows
+        payload["full"] = True
+    else:
+        payload["archive"] = [c for c in payload["calls"]
+                              if seen.get(c.get("id")) != marks.get(c.get("id"))]
+        payload["archive_feed"] = [r for r in rows if r.get("id") not in heard]
+        payload["full"] = False
+    return payload, marks, {r.get("id") for r in rows}
 
 
 def _post(cfg, payload):
-    """Send it. Raises on anything that is not a 2xx."""
+    """Send it. Raises on anything that is not a 2xx; returns the answer.
+
+    The answer is worth reading because the far end has one failure it reports
+    inside a success: the live copy was written and the archive behind it was
+    not. That is deliberately not an HTTP error -- the tracker is current and
+    the push did its main job -- so nothing would ever mention it if this threw
+    the body away.
+    """
     body = json.dumps(payload).encode()
     req = urllib.request.Request(
         cfg["push_url"], data=body, method="POST",
         headers={"Content-Type": "application/json",
                  "Authorization": "Bearer " + str(cfg.get("push_token") or "")})
     with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
-        return r.status
+        try:
+            return json.loads(r.read().decode() or "{}")
+        except Exception:
+            return {}
 
 
 def push_once(cfg):
-    """One push, for the loop below and for `firewall --check`."""
-    return _post(cfg, _payload(cfg))
+    """One push, whole, for `firewall --check`."""
+    payload, _, _ = _payload(cfg)
+    return _post(cfg, payload)
 
 
 def poll(cfg):
@@ -103,14 +172,40 @@ def poll(cfg):
     a reason for this process to stop listening to a scanner.
     """
     every = max(2, int(cfg.get("push_seconds") or 10))
-    failing = None
+    full_every = max(every, int(cfg.get("push_full_seconds") or 300))
+    # Fingerprints of what the far end has been told, and when it was last told
+    # everything. Both live here rather than in module state so that a restart
+    # is a full push, which is the safe direction: the far end is written to
+    # twice rather than never.
+    seen, heard, last_full = None, None, 0.0
+    failing, archiving = None, None
     while True:
         try:
-            push_once(cfg)
+            full = time.time() - last_full >= full_every
+            payload, marks, ids = _payload(cfg, seen, heard, full)
+            answer = _post(cfg, payload)
+            # Only after it landed. Recording what was sent by a push that
+            # failed would have the next one report no changes and the far end
+            # would never hear about those calls again.
+            seen, heard = marks, ids
+            if full:
+                last_full = time.time()
             if failing:
                 print(f"  ·  hosted tracker reachable again "
                       f"({time.strftime('%H:%M:%S')})")
                 failing = None
+            # Reported on the transition like everything else here, and kept
+            # apart from `failing`: a tracker that is live and not archiving is
+            # a different sentence from one that is not answering, and the fix
+            # for each is somewhere else.
+            why = answer.get("archive_error") if isinstance(answer, dict) else None
+            if why != archiving:
+                if why:
+                    print(f"  !  hosted tracker is not keeping history: {why}")
+                else:
+                    print(f"  ·  hosted tracker is keeping history again "
+                          f"({time.strftime('%H:%M:%S')})")
+                archiving = why
         except urllib.error.HTTPError as e:
             # The body carries the reason -- a bad token, no store connected --
             # and the status alone would send somebody to the wrong problem.
@@ -146,8 +241,11 @@ def line(cfg):
                 "is not — nothing will be pushed")
     hours = int(float(cfg.get("push_hours") or 24))
     audio = cfg.get("public_url") or "no audio (FIREWALL_PUBLIC_URL unset)"
+    full = int(cfg.get("push_full_seconds") or 300)
     return (f"  hosted    pushing {hours}h of calls to {cfg['push_url']} "
             f"every {int(cfg.get('push_seconds') or 10)}s\n"
+            f"            calls and transcripts kept there; whole window "
+            f"re-sent every {full}s\n"
             f"            {audio}"
             + ("" if not auth.required(cfg) or cfg.get("push_speech")
                else " · transcripts stripped before they leave"))

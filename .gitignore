@@ -25,3 +25,7 @@ node_modules/
 web/node_modules/
 web/dist/
 .vercel/
+
+# Vercel project credentials. Real push token; the deployment is configured
+# from it, and it is not something the deployment gets to read.
+.env.vercel

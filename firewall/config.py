@@ -146,6 +146,16 @@ DEFAULTS = {
     # How much of the log goes up. The far end expires a snapshot after its own
     # RETAIN_HOURS whatever this says, so the two want to agree.
     "push_hours": 24,
+    # How often the whole window is re-sent rather than just what changed.
+    #
+    # The far end keeps an archive that outlives the snapshot, and it is built
+    # from deltas: a normal push carries the calls that have changed since the
+    # last one, which is usually none. That is cheap and it is also the one
+    # thing that cannot heal itself -- if a write is lost, or the database is
+    # replaced, nothing would ever mention those calls again. So the whole
+    # window goes up on this interval, which re-states every call the far end
+    # should be holding and lets it prune what is past its retention.
+    "push_full_seconds": 300,
     # This machine's public origin, if it has one. Used for two things and
     # needed for neither: it makes the hosted page's play buttons point back at
     # the audio, and it gives "sign in" somewhere to go. Unset -- the normal
@@ -195,6 +205,7 @@ ENV_KEYS = {
     "FIREWALL_PUSH_TOKEN": "push_token",
     "FIREWALL_PUSH_SECONDS": "push_seconds",
     "FIREWALL_PUSH_HOURS": "push_hours",
+    "FIREWALL_PUSH_FULL_SECONDS": "push_full_seconds",
     "FIREWALL_PUBLIC_URL": "public_url",
     "FIREWALL_PUSH_SPEECH": "push_speech",
 }
@@ -241,6 +252,7 @@ _CASTS = {
                                 if o.strip()],
     "push_seconds": int,
     "push_hours": float,
+    "push_full_seconds": int,
     "push_speech": lambda v: v.strip().lower() in ("1", "true", "yes", "on"),
     # name:password pairs. Split on the FIRST colon only, so a password may
     # contain one; a comma may not, and the generator never makes one.

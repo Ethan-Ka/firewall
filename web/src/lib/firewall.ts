@@ -288,6 +288,44 @@ export const stateWord = (st: string | null | undefined): string =>
 export const STATUS_ORDER = ['dispatched', 'enroute', 'on_scene', 'transporting',
                              'at_hospital', 'clear']
 
+/** Where a state sits on that ladder, or -1 for one this file has not been
+ *  taught. Same numbering core ranks by, because it is the same list. */
+export const rankOf = (st: string | null | undefined): number =>
+  st ? STATUS_ORDER.indexOf(st) : -1
+
+/** The furthest any of a call's units was HEARD to get, or null when none was.
+ *
+ * A live call carries the state machine's own answer in `status`. A filed one
+ * never does and never will: the log records what was said, not the machine
+ * core ran over it, so `status` is null however plainly the crews reported
+ * themselves. Drawing a ladder off that alone is what put "Nothing after the
+ * dispatch reached the log" above a units panel reading "M16 en route" and a
+ * transcript containing the sentence it was read off.
+ *
+ * This is not a second reading of the radio. The unit states beside it came out
+ * of those same transmissions through core's own read_status; this asks the one
+ * question higher -- how far did this call get -- of an answer already on the
+ * wire, by the rank core itself orders them with.
+ *
+ * A unit with a null `ts` is skipped rather than counted as dispatched. That is
+ * the state a truck gets for never being heard from, and it is an absence of
+ * evidence rather than a report of one.
+ *
+ * `ceiling` caps how far up the ladder an answer may come from, and the caller
+ * that wants one is asking for the furthest POSITION -- how far the call got
+ * before it ended, which is a different question from whether it ended. A crew
+ * that clears a refusal never transported and was never at a hospital.
+ */
+export function reachedState(call: Call, ceiling?: string): UnitState | null {
+  const cap = ceiling ? rankOf(ceiling) : Infinity
+  let best: UnitState | null = null
+  for (const u of call.unit_states ?? []) {
+    if (u.ts == null || rankOf(u.state) > cap) continue
+    if (!best || rankOf(u.state) > rankOf(best.state)) best = u
+  }
+  return best
+}
+
 /* --------------------------------------------------------------- the clock */
 
 /* Every stamp on the wire is the server's, and every age and countdown here is
@@ -351,6 +389,16 @@ export function ago(seconds: number): string {
   return `${d}d ago`
 }
 
+/** A span in the words somebody would use for it: hours until there are
+ *  enough of them to be days. "720h of history" is a true sentence nobody
+ *  reads as a month. */
+export function spanWords(seconds: number): string {
+  const h = Math.round(seconds / 3600)
+  if (h < 48) return `${h}h`
+  const d = Math.round(h / 24)
+  return d < 60 ? `${d} days` : `${Math.round(d / 30)} months`
+}
+
 /** A duration, for how long a call ran. */
 export function lasted(seconds: number): string {
   const s = Math.max(0, Math.round(seconds))
@@ -361,29 +409,32 @@ export function lasted(seconds: number): string {
 
 /* ---------------------------------------------------------------- windows */
 
-export type WindowKey = '24h' | '7d' | 'all'
+export type WindowKey = '24h' | '7d' | '30d' | 'all'
 
 const ALL_WINDOWS: { key: WindowKey; label: string; seconds: number | null }[] = [
   { key: '24h', label: '24 hours', seconds: 86400 },
   { key: '7d',  label: '7 days',   seconds: 7 * 86400 },
+  { key: '30d', label: '30 days',  seconds: 30 * 86400 },
   { key: 'all', label: 'All',      seconds: null },
 ]
 
 /* How far back this deployment keeps calls at all, in seconds, or null for as
  * far back as the server will go.
  *
- * The hosted tracker is set to a day (VITE_RETAIN_HOURS, in vercel.json).
- * The server holding the radio has the whole incident log on disk and there is
- * no reason to hide it from a screen in the same building; a copy of the
- * tracker on the public internet is a different proposition, and a day is
- * about what "what has this department been called to" actually needs.
+ * The hosted tracker is set to thirty days -- VITE_RETAIN_HOURS=720, on the
+ * Vercel project, imported with the rest of that deployment's configuration --
+ * which is the ARCHIVE_DAYS its functions keep, said in the units a browser
+ * build wants. The two have to agree, and this is the half that shows when they
+ * do not. The server holding the radio sets nothing: it has the whole incident
+ * log on a disk and there is no reason to hide it from a screen in the same
+ * building.
  *
  * It is one number and it does three things, because a retention that only did
- * one of them would be a lie in the other two: it is what the log is ASKED for,
- * what the app KEEPS of the answer, and what the window chooser may OFFER. A
- * "7 days" chip over a day of data is the worst of those -- a person reads an
- * empty week rather than a full day and concludes the department had a quiet
- * week.
+ * one of them would be a lie in the other two: it is what the log and the
+ * history are ASKED for, what the app KEEPS of the answer, and what the window
+ * chooser may OFFER. That last one is the worst to get wrong -- a "30 days"
+ * chip over a week of stored calls has somebody reading an empty month rather
+ * than a full week and concluding the department was quiet.
  */
 const RETAIN_SECONDS = ((): number | null => {
   const raw = Number(import.meta.env.VITE_RETAIN_HOURS)
@@ -401,6 +452,26 @@ const RETAIN_SECONDS = ((): number | null => {
 export const LOG_PATH = RETAIN_SECONDS
   ? `/api/log?hours=${RETAIN_SECONDS / 3600}`
   : '/api/log'
+
+/** The archive, which is a different question asked at a different rate.
+ *
+ *  /api/log is the last day and it is polled every ten seconds; this is
+ *  everything behind it and it changes about as often as the department gets a
+ *  call. Split so the cheap read stays cheap -- asking for a month of calls six
+ *  times a minute to watch the last hour of it change is how a hosted tracker
+ *  gets expensive -- and merged back together in App, where the log's copy of a
+ *  call always wins because it is the newer one.
+ *
+ *  Only a hosted deployment has one. A tracker reading a firewall server
+ *  directly is reading the incident log off a disk, which already goes back as
+ *  far as it goes back, and there is nothing in between to have archived. */
+export const HISTORY_PATH = RETAIN_SECONDS
+  ? `/api/history?days=${Math.ceil(RETAIN_SECONDS / 86400)}`
+  : '/api/history'
+
+/** What was said between two instants, for a call that is over. */
+export const radioPath = (from: number, to: number) =>
+  `/api/radio?from=${Math.floor(from)}&to=${Math.ceil(to)}`
 
 /** The windows this deployment can honestly offer. Nothing longer than what it
  *  keeps, and never empty: retention shorter than a day leaves the day chip,
@@ -421,16 +492,25 @@ export const retained = (): number | null => RETAIN_SECONDS
 export const expired = (c: Call, at: number) =>
   RETAIN_SECONDS !== null && at - c.opened > RETAIN_SECONDS
 
+/** How far back a window reaches, in seconds, or null for as far back as this
+ *  deployment goes.
+ *
+ *  The narrower of the window and the retention, and `all` is not an exemption:
+ *  it means "all of what this deployment has", which is the retention. Exported
+ *  because scoping is not the only thing that needs it -- anything that divides
+ *  by how long we were listening has to be asking the same question the filter
+ *  asked, or it is normalising against a window nobody drew. */
+export function spanOf(win: WindowKey): number | null {
+  const w = WINDOWS.find((x) => x.key === win)
+  if (w?.seconds === null || w?.seconds === undefined) return RETAIN_SECONDS
+  return RETAIN_SECONDS === null ? w.seconds : Math.min(w.seconds, RETAIN_SECONDS)
+}
+
 /** One place decides what is in scope, so the chart and the table never
  *  disagree about which calls they are describing. */
 export function inScope(c: Call, win: WindowKey, dept: string | null, at: number) {
   if (dept && c.dept !== dept) return false
-  const w = WINDOWS.find((x) => x.key === win)
-  /* The narrower of the two, and `all` is not an exemption: it means "all of
-     what this deployment has", which is the retention. */
-  const span = w?.seconds === null || w?.seconds === undefined
-    ? RETAIN_SECONDS
-    : RETAIN_SECONDS === null ? w.seconds : Math.min(w.seconds, RETAIN_SECONDS)
+  const span = spanOf(win)
   return span === null || at - c.opened <= span
 }
 

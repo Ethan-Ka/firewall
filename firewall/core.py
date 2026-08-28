@@ -898,6 +898,42 @@ def read_status(text):
     return "at_hospital" if hospital else None
 
 
+def _asserted(text, is_dispatch):
+    """read_status, with the dispatch flag taken into account.
+
+    A dispatch does not report where a truck is. This archive's tone-outs read
+    "Purdue Fire, Medic 16, en route to Third and Jischke for a possible alcohol
+    poisoning", which is the dispatcher sending a truck that has not keyed up
+    yet; read as a status it would put every unit on a call en route the instant
+    the tones dropped, which is the one thing a per-unit state exists to
+    distinguish. The known cost is a real self-report the parser misread as a
+    dispatch: Engine 11's own "Dispatch, Engine 11, en route, to Earhart"
+    carried an address, was filed as a dispatch, and is why E11 reads
+    "dispatched" on the Earhart run for a call it did answer. Losing one en
+    route is cheaper than inventing three.
+
+    A closer is the exception, and it is not a softening of that rule -- it is
+    the same rule the log already applies. _is_dispatch asks whether a parse is
+    enough to OPEN a call, which is a different question from whether the
+    dispatcher was talking, and "Engine 11 is in service. Three people removed.
+    The elevator has been shut off." answers the first yes and the second no.
+    incidents.record closes on CLOSERS whatever the flag says, so the incident
+    at 1787280198 is on disk stamped closed on that very transmission while the
+    unit that said it read "dispatched". Two readings of one sentence, and the
+    screen was showing the wrong one.
+
+    Only "clear" is taken from a dispatch, never a position: a tone-out naming a
+    place a truck is going is exactly the confusion above, and there is no
+    reading of "stand by for an elevator rescue at Shreve" that means somebody
+    has arrived.
+    """
+    if not text:
+        return None
+    if is_dispatch:
+        return "clear" if _CLEAR_RE.search(text) else None
+    return read_status(text)
+
+
 # --------------------------------------------------------- per-unit status
 # The status above is one word for a whole call, which is what a wall needs and
 # the wrong answer to "which of these trucks is still on it". The Earhart
@@ -933,18 +969,7 @@ def _unit_states(units, rows, address=None):
             for u in units}
     for r in rows:
         text = (r.get("text") or "").strip()
-        # A dispatch never asserts a status, exactly as in publish(). It is not
-        # a scruple: this archive's tone-outs read "Purdue Fire, Medic 16, en
-        # route to Third and Jischke for a possible alcohol poisoning", which is
-        # the dispatcher sending a truck that has not keyed up yet. Read as a
-        # status it would put every unit on a call en route the instant the tones
-        # dropped, which is the one thing this field exists to distinguish. The
-        # known cost is that a real self-report the parser misread as a dispatch
-        # is skipped with them: Engine 11's own "Dispatch, Engine 11, en route,
-        # to Earhart" carried an address, was filed as a dispatch, and is why
-        # E11 reads "dispatched" on the Earhart run for a call it did answer.
-        # Losing one en route is cheaper than inventing three.
-        if not text or r.get("dispatch"):
+        if not text:
             continue
         # Only the units this transmission names move. Nothing else is knowable:
         # "we're on scene" with no designator in it is a truck reporting itself
@@ -952,21 +977,21 @@ def _unit_states(units, rows, address=None):
         said = [u for u in _parse.units(text) if u in seen]
         if not said:
             continue
-        # read_status is the only reader, and not one piece of it is re-tested
-        # here. Asking _ARRIVED_RE directly is the obvious way to write this and
-        # it is wrong: "Engine 11, respond to Earhart, we'll advise on scene"
-        # names a unit and says "on scene" and is an instruction about the
-        # future, and it is _NOT_ARRIVED_RE behind read_status that refuses it.
-        # The other half of the line read_status draws, _self_reported, is
-        # already spent by the time we get here -- naming one of `units` IS its
-        # unit test -- but going through the front door is what guarantees the
-        # two can never come apart.
+        # read_status, through _asserted, is the only reader, and not one piece
+        # of it is re-tested here. Asking _ARRIVED_RE directly is the obvious
+        # way to write this and it is wrong: "Engine 11, respond to Earhart,
+        # we'll advise on scene" names a unit and says "on scene" and is an
+        # instruction about the future, and it is _NOT_ARRIVED_RE behind
+        # read_status that refuses it. The other half of the line read_status
+        # draws, _self_reported, is already spent by the time we get here --
+        # naming one of `units` IS its unit test -- but going through the front
+        # door is what guarantees the two can never come apart.
         #
         # incidents.CLOSERS needs no second test for the same reason: read_status
         # asks it first, ahead of everything else, so a closing transmission
         # arrives here as "clear" already and a second copy of the closing
         # phrases in this file would be one more thing to drift.
-        state = read_status(text)
+        state = _asserted(text, bool(r.get("dispatch")))
         if not state:
             continue
         ts = float(r["ts"])
