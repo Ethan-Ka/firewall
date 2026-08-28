@@ -1,14 +1,15 @@
 # The hosted half, which is now the whole of it
 
 The collector used to run on a machine at home and push what it heard here. It
-does not any more: a cron calls `/api/collect`, which polls Broadcastify,
+does not any more: something calls `/api/collect`, which polls Broadcastify,
 transcribes what it finds, parses it with the same parser the CLI uses, and
 writes the result where the page reads it. Nothing outside this deployment has
-to be running.
+to be running -- though on the Hobby plan something outside it has to be doing
+the calling, for which see **Driving the collector** below.
 
 | Route | What it does | Called every |
 | --- | --- | --- |
-| `/api/collect` | **the radio** -- poll, transcribe, parse, store | 60s, by cron |
+| `/api/collect` | **the radio** -- poll, transcribe, parse, store | ideally 60s; see below |
 | `/api/current` | the radio as of the last collect | 2s |
 | `/api/log` | the last day of calls | 10s |
 | `/api/history` | every call kept, back to `ARCHIVE_DAYS` | 5 min |
@@ -42,7 +43,7 @@ credential, which is the fact that makes this possible at all.
 
 ## Why the collector stays for most of a minute
 
-A cron cannot fire more than once a minute, and this system publishes a call
+A cron cannot fire more than once a minute anywhere, and this system publishes a call
 seconds after the transmission ends. A function that polled once and returned
 would be looking at the radio for one instant in sixty and would miss most of a
 shift. So one invocation polls for `FIREWALL_COLLECT_SECONDS` on the same
@@ -82,6 +83,34 @@ drawn as a visibly unavailable play button. The words are kept. Unless they are
 gated -- if the words are being withheld the tape is not archived at all, rather
 than archived empty, so turning the gate off later starts a real transcript
 instead of leaving a month of blank rows behind it.
+
+## Driving the collector
+
+The schedule in `vercel.json` is `0 12 * * *`, once a day, and that is not an
+opinion about how often the radio should be read. It is the most Vercel's Hobby
+plan will accept: anything more frequent is rejected at build time, with the
+whole deployment failing rather than the cron being quietly downgraded. A
+deployment that will not build collects nothing, so the schedule is the one that
+builds.
+
+One run a day is one fifty-second window. The page will draw it and stamp it,
+and the stamp is how you can tell -- this is not a live tracker, and nothing
+here pretends it is.
+
+Two ways to have it properly:
+
+- **Pro.** Change the schedule to `* * * * *` and it works as designed, which is
+  what the rest of this file describes. The plan also lifts `maxDuration` to
+  300s, though the collector wants nothing above 60.
+- **Call it from anywhere else.** `/api/collect` is an ordinary endpoint with no
+  auth on it, and it does not care what invoked it -- Vercel's cron has no
+  special standing. Anything that can make an HTTP request on a timer drives it:
+
+      while true; do curl -s https://<deployment>/api/collect >/dev/null; sleep 55; done
+
+  Overlapping calls are safe, as the module docstring explains, so the interval
+  does not have to be exact. The worst a stranger can do by calling it is make
+  it poll the radio, which is the thing it exists to do.
 
 ## What to set
 

@@ -1,15 +1,24 @@
 """/api/collect -- the radio, run by a clock instead of by a `while True`.
 
-Vercel's cron calls this once a minute. It stays for most of the minute, polling
-Broadcastify on the same interval the CLI uses, transcribing what it finds and
-writing the result where the page reads it. Then it exits and the next one
-arrives. Between them, everything it knows is in Redis.
+Vercel's cron calls this. It stays for most of a minute, polling Broadcastify
+on the same interval the CLI uses, transcribing what it finds and writing the
+result where the page reads it. Then it exits. Between runs, everything it
+knows is in Redis.
 
 Why it stays rather than polling once and returning: this system publishes a
-call seconds after the transmission ends, and a cron cannot fire more often than
-once a minute. A function that looked at the radio for one instant in every
-sixty would miss most of a shift. So the budget below is nearly the whole
-minute, and the cron's job is only to make sure another one is along behind it.
+call seconds after the transmission ends, and a cron cannot fire more often
+than once a minute even where minute crons are allowed. A function that looked
+at the radio for one instant in every sixty would miss most of a shift. So the
+budget below is nearly the whole minute, and the schedule's job is only to make
+sure another one is along behind it.
+
+That schedule is currently `0 12 * * *` -- once a day -- because Vercel's Hobby
+plan rejects any cron that would run more than daily, and a deployment that
+will not build collects nothing at all. One run a day is not a live tracker and
+is not pretending to be: it is one fifty-second window, and the page will show
+that window and the stamp on it. Anything that calls this endpoint drives it
+just as well as the cron does, on whatever interval the caller likes, which is
+how it gets run properly without the plan -- see api/README.md.
 
 Overlap is safe and expected. Two of these running at once poll the same
 talkgroup twice, which costs a few records; they cannot corrupt anything,
