@@ -25,7 +25,21 @@
 
 # And what the build itself needs to read.
 !/vercel.json
-!/requirements.txt
+
+# There is deliberately no requirements.txt. The collector installs nothing:
+# it reaches Broadcastify, the transcription API and Redis over urllib, signs
+# its own JWT with hmac, and every third-party import left in firewall/ --
+# requests, faster_whisper, anthropic -- sits inside a function the hosted path
+# never calls. So a cold start is the runtime and the source, with no wheel to
+# fetch and no version that can break because something upstream shipped on a
+# Tuesday.
+#
+# It is absent rather than empty on purpose. A requirements.txt at the root is
+# how Vercel decides a repository is a Python *application* and starts hunting
+# for a single WSGI entrypoint to serve every route from; pyproject.toml reads
+# the same way, which is why it is not carved back in above. This deployment is
+# a static site with Python functions beside it, and "framework": null in
+# vercel.json says so a second time.
 
 # The two things inside web/ that are made, not written.
 /web/node_modules

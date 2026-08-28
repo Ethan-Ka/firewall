@@ -33,7 +33,7 @@ import _redis
 import _transcribe
 
 # How long one invocation spends listening. Under the function's own maxDuration
-# (300s in vercel.json) with room to spare, because the run has to END on its own
+# (60s in vercel.json) with room to spare, because the run has to END on its own
 # terms -- a function that is killed at the limit never writes its state back,
 # and every record it transcribed on the way is paid for and lost.
 BUDGET = int(os.environ.get("FIREWALL_COLLECT_SECONDS") or 50)
