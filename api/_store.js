@@ -101,7 +101,7 @@ export async function kvGet() {
 export const nothing = () =>
   store()
     ? 'no update from the radio in the last day'
-    : 'this deployment has no store connected (see web/api/README.md)'
+    : 'this deployment has no store connected (see api/README.md)'
 
 /* ------------------------------------------------------------- the archive
  *

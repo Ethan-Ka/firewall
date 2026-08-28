@@ -37,7 +37,7 @@ const HISTORY_MS = 300000
 /* Past this, a pushed copy is old enough to say so in the hazard colour. The
  * far end is what decides whether stale means `ok: false` -- it stamped the
  * push and measured the age on one clock, and this is only the colour. Kept
- * equal to STALE_SECONDS in web/api/_store.js so the word and the colour turn
+ * equal to STALE_SECONDS in api/_store.js so the word and the colour turn
  * over at the same moment. */
 const PUSH_STALE = 120
 
