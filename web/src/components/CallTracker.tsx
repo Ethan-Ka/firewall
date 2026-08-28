@@ -40,7 +40,7 @@ import {
   reachedState,
   reducedMotion,
   stateWord,
-  wire,
+  wireJson,
 } from '@/lib/firewall'
 
 const COLUMNS = 6
@@ -327,22 +327,27 @@ const TRAIL = 120
 function Tape({ call }: { call: Call }) {
   const [rows, setRows] = useState<Row[] | null>(null)
   const [error, setError] = useState<string | null>(null)
+  /* Whether this deployment keeps transcripts at all, which is a different
+     fact from whether it kept any of THIS call's. "Nothing was said here" and
+     "nothing is written down anywhere" read the same on screen and would send
+     somebody looking in two different places. */
+  const [absent, setAbsent] = useState(false)
 
   useEffect(() => {
     let stop = false
     const to = call.closed ?? call.opened + OPEN_TAIL
     ;(async () => {
       try {
-        const r = await wire(radioPath(call.opened - LEAD, to + TRAIL))
-        /* No such route: this tracker is reading a firewall server directly, or
-           a hosted half that predates the archive. Neither is an error worth
-           printing -- the section simply is not there. */
-        if (r.status === 404) { if (!stop) setRows([]) ; return }
-        if (!r.ok) throw new Error(`HTTP ${r.status}`)
-        const j: { feed?: Row[]; error?: string } = await r.json()
+        /* Null is "this deployment has no archive" -- a firewall server being
+           read directly, which answers an unknown /api path with a page rather
+           than a 404, or a hosted half that predates it. Not an error, and the
+           empty case below already has words for it. */
+        const j = await wireJson<{ feed?: Row[]; error?: string }>(
+          radioPath(call.opened - LEAD, to + TRAIL))
         if (stop) return
-        setError(j.error ?? null)
-        setRows(j.feed ?? [])
+        setAbsent(j === null)
+        setError(j?.error ?? null)
+        setRows(j?.feed ?? [])
       } catch (e) {
         if (!stop) { setError(String((e as Error).message || e)); setRows([]) }
       }
@@ -359,9 +364,11 @@ function Tape({ call }: { call: Call }) {
   if (!rows.length) {
     return (
       <p className="text-sm text-muted-foreground">
-        {call.live
-          ? 'Still running — the transcript is in the panel on the right.'
-          : 'Nothing from this call was kept.'}
+        {absent
+          ? 'This server does not keep transcripts past the live tape.'
+          : call.live
+            ? 'Still running — the transcript is in the panel on the right.'
+            : 'Nothing from this call was kept.'}
       </p>
     )
   }

@@ -22,6 +22,14 @@ the steady state is nothing at all. Every `push_full_seconds` the whole window
 goes up instead, flagged `full`, which re-states everything the far end should
 be holding and is what makes a lost write or a replaced database heal itself.
 
+Corrections cross too, and they are the one thing here that travels backwards.
+The tape is pushed forwards -- a transmission is archived once, under its id,
+because what was said was said -- but a truth typed into the review UI is a
+better version of something already written down, often days later, long after
+the clip itself has been evicted from memory. So it goes as a patch: the row's
+id and the words, addressed to a row the far end already holds. See
+_corrections below.
+
 Two things deliberately do not cross:
 
 Audio. A day of trunked radio is gigabytes and the clips only exist in this
@@ -37,7 +45,7 @@ page then reads as locked in exactly the way this server's own pages do.
 """
 import hashlib, json, time, urllib.error, urllib.request
 
-from . import auth, core
+from . import auth, core, corpus as _corpus, incidents as _incidents
 
 # One connection's worth of patience. The push is a background nicety and the
 # radio does not wait for it: a socket hung on a datacentre that has stopped
@@ -61,13 +69,22 @@ def _fingerprints(calls):
     return out
 
 
-def _payload(cfg, seen=None, heard=None, full=True):
+def _payload(cfg, seen=None, heard=None, full=True, fixes=None, sent=None):
     """One snapshot, as the far end wants it. Nothing here touches the network.
 
     `seen` is the fingerprints of the calls in the last push and `heard` the ids
     of the transmissions in it; together they are what turn the archive into a
     delta. Passing None for either -- which is what `firewall --check` and the
     first tick of the loop do -- sends the lot.
+
+    `fixes` is every hand-typed correction the log knows about and `sent` the
+    ones the far end has already been given, and they work the same way. Passing
+    None for `fixes` reads them off disk here, which is what --check does;
+    the loop reads them itself, so it can do it only when somebody has actually
+    typed something.
+
+    Returns (payload, call fingerprints, transmission ids, corrections told),
+    the last three being what the caller records once the push has landed.
     """
     hours = float(cfg.get("push_hours") or 24)
     log = core.roster(cfg, since=time.time() - hours * 3600)
@@ -131,7 +148,27 @@ def _payload(cfg, seen=None, heard=None, full=True):
                               if seen.get(c.get("id")) != marks.get(c.get("id"))]
         payload["archive_feed"] = [r for r in rows if r.get("id") not in heard]
         payload["full"] = False
-    return payload, marks, {r.get("id") for r in rows}
+
+    # Corrections, and they go the other way to everything above: not a row the
+    # far end has never seen, but better words for one it has been holding for
+    # days. A truth is typed long after the clip has left the tape, so there is
+    # no version of this that rides along on the feed -- it is addressed by the
+    # transmission's id and merged into whatever the archive already has under
+    # it. See incidents.corrections and _store.js's amend().
+    #
+    # Gated with the rest of the words, and it has to be said out loud because
+    # this one arrives by a different door: a correction is a transcript, so a
+    # deployment that is not being told what was said must not be told what was
+    # really said either.
+    told = {} if payload.get("speech") is False else (
+        _incidents.corrections(cfg) if fixes is None else fixes)
+    # Re-stated in full on a full push, exactly like the archive above and for
+    # the same reason: a write that was lost, or a database that was replaced,
+    # heals on the next one rather than leaving the machine's guess up for ever.
+    payload["corrections"] = [
+        {"id": k, "text": v} for k, v in sorted(told.items())
+        if full or sent is None or sent.get(k) != v]
+    return payload, marks, {r.get("id") for r in rows}, told
 
 
 def _post(cfg, payload):
@@ -157,7 +194,7 @@ def _post(cfg, payload):
 
 def push_once(cfg):
     """One push, whole, for `firewall --check`."""
-    payload, _, _ = _payload(cfg)
+    payload, _, _, _ = _payload(cfg)
     return _post(cfg, payload)
 
 
@@ -178,16 +215,35 @@ def poll(cfg):
     # is a full push, which is the safe direction: the far end is written to
     # twice rather than never.
     seen, heard, last_full = None, None, 0.0
+    # The corrections the log holds, the ones the far end has been given, and
+    # the corpus's stamp at the time the first of those was read. Kept apart
+    # because reading them is a walk of every incident.json on disk, and the
+    # answer only ever changes when somebody types into the review UI -- so it
+    # is read once, and then only when the corpus file itself has moved.
+    fixes, told, stamped = None, None, ()
     failing, archiving = None, None
     while True:
         try:
             full = time.time() - last_full >= full_every
-            payload, marks, ids = _payload(cfg, seen, heard, full)
+            at = _corpus.stamp(cfg)
+            if fixes is None or at != stamped:
+                fixes, stamped = _incidents.corrections(cfg), at
+            payload, marks, ids, now_told = _payload(cfg, seen, heard, full,
+                                                     fixes, told)
+            # Before the post, because `told` is about to become this, and a
+            # push that re-states everything on its five-minute tick is not
+            # news. Only a correction the far end has not been given the current
+            # words for is worth a line.
+            fresh = [c for c in payload["corrections"]
+                     if (told or {}).get(c["id"]) != c["text"]]
             answer = _post(cfg, payload)
             # Only after it landed. Recording what was sent by a push that
             # failed would have the next one report no changes and the far end
             # would never hear about those calls again.
-            seen, heard = marks, ids
+            seen, heard, told = marks, ids, now_told
+            if fresh:
+                print(f"  ·  {len(fresh)} correction(s) published to the "
+                      f"hosted tracker")
             if full:
                 last_full = time.time()
             if failing:

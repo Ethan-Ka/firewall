@@ -14,11 +14,26 @@ this program and can be edited in any text editor.
 import json, os, re, subprocess, sys
 from pathlib import Path
 
-from . import core, segments as _segments
+from . import core, incidents as _incidents, segments as _segments
 
 
 def _path(cfg):
     return Path(cfg.get("corpus_path") or "./corpus.jsonl")
+
+
+def stamp(cfg):
+    """(mtime, size) of the corpus, or None when there is not one yet.
+
+    The cheap question: has anybody typed a truth since we last looked? Asked by
+    the push loop every few seconds, which is why it is a stat and not a read --
+    the answer is no essentially always, and the walk it guards reads every
+    incident.json on disk.
+    """
+    try:
+        st = _path(cfg).stat()
+    except OSError:
+        return None
+    return (st.st_mtime_ns, st.st_size)
 
 
 def load(cfg):
@@ -38,14 +53,43 @@ def load(cfg):
 
 
 def save(cfg, audio, text):
-    """Record one hand-typed truth, replacing any earlier one for that clip."""
+    """Record one hand-typed truth, replacing any earlier one for that clip.
+
+    Two places, and corpus.jsonl is the one that matters. It is the durable
+    record: it is what --score reads, it outlives any change to this program,
+    and every other copy of a truth is a projection of it that can be rebuilt.
+
+    The other place is the transmission itself. A correction that only ever
+    reaches a file on this laptop is a correction nobody will ever see -- the
+    machine's version is what the display draws, what the log keeps and what a
+    hosted tracker publishes, and it stays wrong for ever no matter how many
+    people type the right words next to it. So the truth is written onto the
+    transmission in the incident log, where the readers are, and onto the live
+    tape if the clip is recent enough to still be on it. push.py takes it from
+    the log to a hosted tracker on the next push.
+
+    Returns (rows, note): every truth known, and whatever publishing had to say
+    for itself -- a clip that is not part of an incident, or one holding an
+    exchange that cannot be divided between two speakers. The note is not an
+    error. The label is saved either way; it simply has nowhere to be published.
+    """
     audio = str(audio)
     rows = [c for c in load(cfg) if c.get("audio") != audio]
     rows.append({"audio": audio, "text": text})
     p = _path(cfg)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text("".join(json.dumps(r) + "\n" for r in rows))
-    return rows
+    # After the corpus is on disk and never instead of it. Publishing is the
+    # nicety; the labelling is the expensive part and it must not be lost to a
+    # log directory that has moved or a permission that has changed.
+    note = None
+    try:
+        rid, note = _incidents.apply_truth(cfg, audio, text)
+        if rid:
+            core.amend(rid, text)
+    except Exception as e:
+        note = f"not published ({type(e).__name__}: {e})"
+    return rows, note
 
 
 def roots(cfg):
@@ -229,7 +273,6 @@ def label(cfg, target):
     if not clips:
         print("  nothing new to label here.")
         return 0
-    out = _path(cfg)
     print(f"  {len(clips)} unlabelled clip(s). Enter types it, r replays, "
           f"s skips, q quits.\n  Type what was SAID, not what it should have "
           f"been. Blank means no speech.\n")
@@ -251,9 +294,12 @@ def label(cfg, target):
             break
         if said is None:
             continue
-        with out.open("a") as f:
-            f.write(json.dumps({"audio": str(clip), "text": said}) + "\n")
-        print(f"      saved ({said!r})\n")
+        # Through save() rather than appending here, so a truth typed at the
+        # terminal is published onto its transmission exactly like one typed in
+        # the review UI. Appending straight to the file was the older way and it
+        # made the two paths mean different things.
+        _, note = save(cfg, str(clip), said)
+        print(f"      saved ({said!r})" + (f"  --  {note}" if note else "") + "\n")
     return 0
 
 

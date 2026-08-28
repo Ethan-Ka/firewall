@@ -133,6 +133,7 @@ kbd{
   <h1>firewall · review</h1>
   <span class="hint">type what was <em>said</em>, not what it should have been</span>
   <span class="stats" id="stats"></span>
+  <span class="note" id="said"></span>
 </header>
 <main>
   <div id="list"></div>
@@ -408,12 +409,32 @@ function select(path) {
   $('#truth').focus();
 }
 
+/* One line under the box about what happened to the last thing you typed.
+   Cleared by the next save, and by moving to another clip, because a note about
+   a clip you are no longer looking at reads as a note about this one. */
+function said(answer) {
+  const el = $('#said');
+  if (!el) return;
+  const note = answer && answer.note;
+  el.textContent = note ? `saved \u2014 ${note}` : '';
+}
+/* In the header rather than under the box, because saving moves you to the next
+   clip: a line sitting in the editor would be about the clip you just left
+   while pointing at the one you are now looking at. */
+
 async function save(forced) {
   const c = at();
   if (!c) return;
   const text = forced !== undefined ? forced : ($('#truth')?.value ?? '').trim();
-  await fetch('/api/label', {method:'POST',
+  const r = await fetch('/api/label', {method:'POST',
     body: JSON.stringify({path: c.path, text})});
+  /* The label is saved whatever this says -- corpus.jsonl is written before the
+     server tries to publish anything -- so a note is news and not a failure:
+     this clip is one --score will measure and one the log and the hosted
+     tracker will go on showing the machine's version of. Worth a line, because
+     the alternative is silently believing you have fixed a transcript that
+     nobody else will ever see fixed. */
+  said(await r.json().catch(() => null));
   /* Which clip is next is decided against the list on screen, before the
      reload, so that a call arriving at the top while you were typing cannot
      send "save & next" somewhere you did not ask for. */

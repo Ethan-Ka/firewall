@@ -1,5 +1,5 @@
 """Shared state and the audio-to-screen path. The calls currently running."""
-import copy, re, sys, threading, time
+import copy, os, re, sys, threading, time
 from collections import deque
 from pathlib import Path
 from . import (geo as _geo, incidents as _incidents, parse as _parse,
@@ -88,6 +88,24 @@ _tape = deque()                 # rows, oldest first; several may share one clip
 _clips = {}                     # clip id -> {ident, mime, data, rows}
 _tape_seq = 0
 
+# What makes a row id this row's for ever, and not merely for this run.
+#
+# The counter below starts at zero every time this process does, so before this
+# existed the first clip of a restart was "1" and its rows were "1-1", "1-2" --
+# the same ids yesterday's first clip had. Harmless while the tape is only ever
+# memory, and not harmless the moment anything writes a row down: the hosted
+# archive keeps transmissions in a hash keyed on this id, so the first clip
+# after a restart landed ON TOP of an unrelated transmission from the previous
+# run and the older one was gone. Corrections make it worse again -- they are
+# addressed by id, so an id naming two different transmissions would apply a
+# hand-typed truth to whichever one the archive happened to be holding.
+#
+# The clock and the pid, because between them no two runs on this machine
+# collide and the id still says roughly when it was made when you are looking
+# at one in a database. Nothing parses it: the display, the tracker and the
+# archive all treat a row id as opaque.
+_RUN = f"{int(time.time()):x}{os.getpid():x}"
+
 
 def _clip_ident(p):
     """What makes two paths the same recording, for the blob store.
@@ -118,7 +136,10 @@ def _evict():
     of a grant's two rows frees nothing, and the loop has to keep going.
     """
     def bytes_held():
-        return sum(len(c["data"]) for c in _clips.values())
+        # A clip held remotely weighs nothing here, because its bytes are not
+        # here. It still counts against _TAPE_CLIPS with everything else -- the
+        # tape is a window on time, and that cap is what makes it one.
+        return sum(len(c["data"] or b"") for c in _clips.values())
 
     while len(_tape) > _TAPE_CLIPS or (bytes_held() > _TAPE_BYTES
                                        and len(_tape) > 1):
@@ -128,7 +149,7 @@ def _evict():
             del _clips[k]
 
 
-def _tape_put(dept, text, ts, audio, dispatch, span=None):
+def _tape_put(dept, text, ts, audio, dispatch, span=None, remote=None):
     """Keep one transmission's audio. Returns its row id, or None if there is none.
 
     `span` is the keyup this row is, as a reference into the record: see
@@ -140,6 +161,34 @@ def _tape_put(dept, text, ts, audio, dispatch, span=None):
     fragment on the URL, nothing for a player to get wrong.
     """
     global _tape_seq
+    if remote:
+        # The record is somewhere else and stays there.
+        #
+        # This is what lets the tape exist in a process that cannot hold it. A
+        # serverless collector has no 48MB of memory to keep a rolling window of
+        # mp3s in and nowhere to put it between invocations, but the row is not
+        # the audio -- it is the fact that a transmission happened, at a time,
+        # with words in it, and a way to hear it again. `remote` is that way: an
+        # absolute URL at the source, which the display treats as it treats any
+        # other, and which nothing here has to store, evict or serve.
+        #
+        # The URL is also the identity, which is exactly right. Two keyups off
+        # one trunked grant came out of one record and therefore one URL, so
+        # they land on one clip id and differ only in their play range -- the
+        # same thing _clip_ident buys locally by looking at the inode.
+        with _lock:
+            cid = _held(remote)
+            if cid is None:
+                _tape_seq += 1
+                # Same id scheme as the local branch below, _RUN and all. It
+                # matters more here, not less: every invocation of a serverless
+                # collector is a new run, and the archive stores rows under
+                # these ids for a month. Two runs minting "3-1" a fortnight
+                # apart would have the second quietly overwrite the first.
+                cid = f"{_RUN}-{_tape_seq}"
+                _clips[cid] = {"ident": remote, "mime": None, "data": None,
+                               "url": remote, "rows": 0}
+            return _tape_row(cid, dept, text, ts, dispatch, span)
     p = Path(audio) if audio else None
     if not p or not p.is_file():
         return None
@@ -174,22 +223,34 @@ def _tape_put(dept, text, ts, audio, dispatch, span=None):
                           f"({type(e).__name__}: {e})", file=sys.stderr)
                     return None
             _tape_seq += 1
-            cid = str(_tape_seq)
+            cid = f"{_RUN}-{_tape_seq}"
             _clips[cid] = {"ident": ident, "mime": mime, "data": data, "rows": 0}
-        c = _clips[cid]
-        c["rows"] += 1
-        # Row ids stay unique for the life of the process: the count only ever
-        # goes up, and a clip that is evicted and later arrives again is a new
-        # clip id. The display keys its list on this, so two rows off one grant
-        # must not collide.
-        rid = f"{cid}-{c['rows']}"
-        _tape.append({"id": rid, "clip": cid, "dept": dept, "ts": float(ts),
-                      "text": text, "dispatch": bool(dispatch),
-                      "start": float(span["start"]) if span else None,
-                      "end": float(span["end"]) if span else None,
-                      "play_start": (span or {}).get("play_start"),
-                      "play_end": (span or {}).get("play_end")})
-        _evict()
+        return _tape_row(cid, dept, text, ts, dispatch, span)
+
+
+def _tape_row(cid, dept, text, ts, dispatch, span):
+    """Append one row against a clip already in the store. Caller holds the lock.
+
+    Shared by both paths into _tape_put so that a row is built one way whether
+    its audio is a file on this disk or a URL at the source: same id scheme,
+    same fields, same eviction. The only difference between the two is where the
+    bytes are, and by this point that has already been decided."""
+    c = _clips[cid]
+    c["rows"] += 1
+    # Row ids stay unique for good, not merely for the life of the process:
+    # the count only ever goes up, a clip that is evicted and later arrives
+    # again is a new clip id, and _RUN keeps two runs apart. The display keys
+    # its list on this, the incident log writes it down and the hosted archive
+    # stores rows under it, so two rows off one grant must not collide and
+    # neither must two runs.
+    rid = f"{cid}-{c['rows']}"
+    _tape.append({"id": rid, "clip": cid, "dept": dept, "ts": float(ts),
+                  "text": text, "dispatch": bool(dispatch),
+                  "start": float(span["start"]) if span else None,
+                  "end": float(span["end"]) if span else None,
+                  "play_start": (span or {}).get("play_start"),
+                  "play_end": (span or {}).get("play_end")})
+    _evict()
     return rid
 
 
@@ -213,6 +274,20 @@ def _tape_amend(rid, text=None, dispatch=None):
             row["text"] = text
         if dispatch is not None:
             row["dispatch"] = bool(dispatch)
+
+
+def amend(rid, text):
+    """Put a hand-typed correction onto a row that is still on the tape.
+
+    The public half of _tape_amend, and the only one anything outside this
+    module calls. A clip labelled minutes after it was heard is still in the
+    window the wall display draws, so the corrected words can reach the screen
+    at once instead of waiting for a reader that goes through the log. A clip
+    labelled tomorrow is long evicted, and this quietly does nothing -- which is
+    correct: the tape is what is being said now, and the archive is where a
+    correction to something said yesterday belongs (see incidents.corrections).
+    """
+    _tape_amend(rid, text=text)
 
 
 def clip(cid):
@@ -297,7 +372,14 @@ def _row(c):
     promise that nothing changed for the single-keyup clips that are almost all
     of them: same URL, same behaviour, no range for a player to mis-seek.
     """
-    url = "/api/clip?id=" + c["clip"]
+    # Where this record can be heard. Locally that is this server, which is
+    # holding the bytes; for a clip the tape only has a reference to, it is
+    # wherever the reference points -- absolute, at the source, because there is
+    # nothing here to serve. Either way a media fragment goes on the end when
+    # the row is one keyup out of several, and the display cannot tell which
+    # kind it is looking at.
+    held = _clips.get(c["clip"]) or {}
+    url = held.get("url") or ("/api/clip?id=" + c["clip"])
     if c["play_end"] is not None:
         url = _segments.fragment(url, c)
     return {"id": c["id"], "clip": c["clip"], "ts": c["ts"], "text": c["text"],
@@ -749,7 +831,24 @@ def transcribe_spans(path, cfg, alternate=False):
         initial_prompt=None if alternate else _places.DISPATCH_STYLE,
         temperature=0.2 if alternate else 0.0,
     )
-    dur = float(info.duration)
+    return spans_from(list(segments), float(info.duration))
+
+
+def spans_from(segments, dur):
+    """Whisper's segments for one record -> one span per keyup inside it.
+
+    Split out of transcribe_spans so that a decode which did not happen in this
+    process can reach the same answer. The local path runs faster-whisper and
+    hands its Segments straight here; the hosted collector has no room for a
+    480MB model and gets the same shapes back from a transcription API, so this
+    is the seam where the two rejoin. Everything below this line -- how a keyup
+    is found, which filler loses its words, what a player is told to seek to --
+    is decided once, for both.
+
+    `segments` is anything split() will take: objects with .start, .end, .text
+    and optionally .words. `dur` is the record's length in seconds, which is
+    what keeps a span from claiming audio the file does not have.
+    """
     # split() takes a `drop` predicate so caption filler can be removed BEFORE
     # the gaps are measured, and _is_hallucination is deliberately NOT passed
     # to it. Under the settings this program actually decodes with -- beam 8,
@@ -1281,7 +1380,7 @@ def _is_dispatch(f, text):
     return rank >= 2 or (rank >= 1 and _incidents.TONE_OUT.search(text) is not None)
 
 
-def publish(dept, text, ts, cfg, audio=None, span=None):
+def publish(dept, text, ts, cfg, audio=None, span=None, remote=None):
     """Parse a transcript and, if it looks like a dispatch, put it on screen.
 
     Every transmission is filed against an incident either way: the chatter
@@ -1317,7 +1416,7 @@ def publish(dept, text, ts, cfg, audio=None, span=None):
     # the screen entirely whenever nothing downstream claimed it, so the rule is
     # now the other way round: it hits the display, then it gets sorted out.
     # _tape_amend puts the parse's two corrections back onto the row.
-    rid = _tape_put(dept, text, ts, audio, False, span)
+    rid = _tape_put(dept, text, ts, audio, False, span, remote=remote)
     f = _parse.parse(text, cfg) if text else {}
     # A dispatch with no location is the one outcome worth spending time on:
     # it is unusable on screen, and the address is usually there in the audio.
@@ -1361,7 +1460,8 @@ def publish(dept, text, ts, cfg, audio=None, span=None):
     state = read_status(text) if text and not is_dispatch else None
     try:
         _incidents.record(cfg, dept, text, ts, audio,
-                          f if is_dispatch else None, span=span, state=state)
+                          f if is_dispatch else None, span=span, state=state,
+                          rid=rid)
     except Exception as e:
         print(f"  !  incident log failed ({type(e).__name__}: {e})", file=sys.stderr)
     if not is_dispatch:

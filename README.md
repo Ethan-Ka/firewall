@@ -1051,6 +1051,44 @@ FIREWALL_WHISPER_VAD=true firewall --score
 The corpus is JSONL, one `{"audio": ..., "text": ...}` per line, so it outlives
 any change to this program and can be edited in any text editor.
 
+### Where a correction goes
+
+A truth typed here is not only a measurement. It is also the best version of
+what was said on that transmission, and until it was published nothing but
+`--score` ever read it: the display, the incident log and a hosted tracker all
+went on showing the machine's guess for ever, however many people typed the
+right words next to it.
+
+So saving a label writes it in two places. `corpus.jsonl` is the durable one and
+nothing about that has changed. The transmission in the incident log gets it as
+well, as a `truth` beside the machine's `text` rather than over it -- `--score`
+needs the machine's version to score, and the review UI diffs against it. From
+there:
+
+- Anything reading the log for **what was said** prefers the truth. That is
+  `--replay`, which marks a corrected line with `*`, and the per-unit call
+  status the display and the tracker draw.
+- If the clip is recent enough to still be on the tape, the **live display**
+  picks it up on its next poll.
+- The next push carries it to a **hosted tracker**, as `corrections` -- a patch
+  of `{id, text}` addressed to the archived transmission, since by then the clip
+  itself is long gone from memory. The far end merges it, keeps the machine's
+  version alongside as `machine`, and reports how many rows it changed. See
+  `api/README.md`.
+
+Two cases do not publish, and the review UI says so rather than pretending:
+
+- **A clip that is not part of an incident** -- a loose recording in
+  `audio_dir`. There is no transmission to correct.
+- **A grant holding more than one keyup.** A truth is keyed on the recording and
+  a transmission is a keyup inside it, so one typed line covers an exchange
+  between two speakers and nothing here knows where to cut it. Guessing would
+  put the dispatcher's sentence in the medic's mouth in a log people read to
+  find out who said what. The label is still saved and `--score` still reads it.
+
+Corrections are words, so they are gated with the rest of them: a deployment
+that is not being told what was said is not told what was really said either.
+
 ---
 
 ## Incidents

@@ -467,8 +467,13 @@ class _Handler(BaseHTTPRequestHandler):
         if not p:
             return self._json({"error": "not a saved clip"}, 404)
         if route.path == "/api/label":
-            _corpus.save(self.cfg, str(p), str(body.get("text", "")).strip())
-            self._json({"ok": True})
+            # `note` is why the truth could not be published onto the
+            # transmission -- a loose clip, or a grant holding an exchange. Not
+            # an error and not a failure to save: the corpus has it either way,
+            # and --score reads the corpus. The UI says so quietly.
+            _, note = _corpus.save(self.cfg, str(p),
+                                   str(body.get("text", "")).strip())
+            self._json({"ok": True, "note": note})
         elif route.path == "/api/transcribe":
             self._json({"text": core.transcribe(p, self.cfg)})
         else:

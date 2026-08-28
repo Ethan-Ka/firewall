@@ -369,10 +369,58 @@ def _write(inc):
     # this machine and would be stale the moment the directory moved.
     body = {k: v for k, v in inc.items()
             if k != "dir" and not k.startswith("_")}
+    _keep_truths(p / "incident.json", body)
     try:
         (p / "incident.json").write_text(json.dumps(body, indent=1))
     except Exception as e:
         print(f"  !  incident not saved: {e}", file=sys.stderr)
+
+
+def _keep_truths(f, body):
+    """Carry any hand-typed truths on disk into the version about to replace it.
+
+    This module writes incident.json from memory, whole, after every
+    transmission. apply_truth() writes into the same file from somewhere else --
+    the review UI, which is very often a SECOND process (`firewall --review`
+    attaches no source precisely so you can label yesterday while today is being
+    recorded). Nothing in the live process's memory knows a truth was typed, so
+    the next transmission on that call would rewrite the file without it and the
+    label would appear to save and then vanish.
+
+    corpus.jsonl is the durable record and this is a projection of it, so the
+    worst case was recoverable rather than lost -- but "recoverable by knowing
+    to re-run something" is not a thing to leave in a program, and a read of a
+    few kilobytes on a write that happens a few times a minute is not a cost.
+
+    Matched on the tape row id, and on the (ts, audio) pair for rows filed
+    before ids were written down. Never on position: a rewrite can add rows.
+
+    `body` shares its rows with the caller's in-memory incident, so this puts
+    the truth back into memory as well as onto disk. That is deliberate: the
+    live process then carries it, and the read above costs something only on the
+    first write after a label rather than on every transmission for ever.
+    """
+    try:
+        was = json.loads(f.read_text()).get("transmissions") or []
+    except Exception:
+        return                      # no file yet, or nothing readable in it
+    truths = {}
+    for t in was:
+        if t.get("truth") is None:
+            continue
+        if t.get("id"):
+            truths[("id", t["id"])] = t["truth"]
+        truths[("at", t.get("ts"), t.get("audio"))] = t["truth"]
+    if not truths:
+        return
+    for t in body.get("transmissions") or []:
+        if t.get("truth") is not None:
+            continue
+        got = truths.get(("id", t.get("id"))) if t.get("id") else None
+        if got is None:
+            got = truths.get(("at", t.get("ts"), t.get("audio")))
+        if got is not None:
+            t["truth"] = got
 
 
 def _stash(src, dst):
@@ -398,7 +446,8 @@ def _stash(src, dst):
         shutil.copy(src, dst)
 
 
-def record(cfg, dept, text, ts, audio=None, call=None, span=None, state=None):
+def record(cfg, dept, text, ts, audio=None, call=None, span=None, state=None,
+           rid=None):
     """File one transmission. `call` is the parse result, or None for chatter.
 
     `span` is which stretch of `audio` this transmission is, when the clip held
@@ -410,6 +459,15 @@ def record(cfg, dept, text, ts, audio=None, call=None, span=None, state=None):
 
     `state` is what core read off this transmission -- see reopens(), which is
     the only thing here that uses it.
+
+    `rid` is the id this transmission already carries on core's tape, written
+    down so the log and the tape agree about which transmission is which.
+    Nothing in this module reads it; it is here because a correction is
+    addressed by it. A truth typed against a clip a week from now has to name a
+    row the hosted archive is already holding, the archive knows that row by its
+    tape id, and this file is the only place the two could ever be joined up
+    again. None for a source that keeps no audio, and a row with no id is simply
+    one no correction can reach.
     """
     root = _root(cfg)
     if not root:
@@ -506,6 +564,8 @@ def record(cfg, dept, text, ts, audio=None, call=None, span=None, state=None):
             else:
                 files[src] = name
     row = {"ts": ts, "text": text, "audio": name, "dispatch": bool(call)}
+    if rid:
+        row["id"] = rid
     if name and span:
         # Where inside that file this transmission is, so --replay and anything
         # else reading the log can seek to the right voice instead of playing
@@ -670,7 +730,105 @@ def transmissions(cfg, ident):
         rows = json.loads(body).get("transmissions") or []
     except Exception:
         return None, None
+    # A hand-typed truth outranks what whisper heard, here and everywhere the
+    # words are read for meaning rather than for scoring. This is the read path
+    # core takes to work out which of a call's units have cleared, and a
+    # correction is precisely the case where the machine's version was wrong
+    # enough to be worth typing over -- reading "Engine 2 is and service" when
+    # somebody has already written down "Engine 2 is in service" would be
+    # keeping the mistake on purpose.
+    #
+    # The machine's own text stays on the row and is untouched: corpus.py scores
+    # against it, and the review UI shows it next to the box you type into. Only
+    # this reading of the file prefers the truth. `truth` may be the empty
+    # string, which is a label meaning "nothing was said on this one", so the
+    # test is against None and not against falseness.
+    rows = [dict(r, text=r["truth"]) if r.get("truth") is not None else r
+            for r in rows]
     return (st.st_mtime_ns, st.st_size), rows
+
+
+def apply_truth(cfg, path, text):
+    """Write one hand-typed truth onto the transmission it belongs to.
+
+    Returns (row id, note). The id is the tape row this correction is addressed
+    to, or None when there is nothing to address it to; `note` says why, and is
+    None when the truth landed cleanly.
+
+    A truth is keyed on the RECORDING and a transmission is a keyup inside it,
+    and those are not always the same thing. A trunked grant holds the talkgroup
+    through the hang time, so an exchange -- "Dispatch 16, that is a negative."
+    answered four seconds later by "Clear, thank you." -- reaches disk as one
+    mp3 with two transmissions pointing into it. One typed line covers both, and
+    there is no honest way to divide it: nothing here knows which words were the
+    first voice and which the second, and a guess would put the dispatcher's
+    sentence in the medic's mouth on a log people read to find out who said
+    what. So a clip holding more than one keyup keeps its truth in corpus.jsonl,
+    where --score reads it, and its transmissions keep the machine's version.
+    That is the uncommon case; a record that turned out to hold exactly one
+    keyup is the overwhelmingly common one.
+
+    A clip that is not inside an incident directory -- a loose recording in
+    audio_dir -- has no transmission to write to and no id to correct by. The
+    label is still saved; there is simply nowhere for it to be published to.
+
+    Read and written without a lock, because the file this races against is one
+    a live call is being appended to and the race heals itself in both
+    directions: a transmission filed between this read and this write is put
+    back by that call's next _write, which writes the whole incident from
+    memory, and the truth written here survives that because _keep_truths
+    carries it across. Locking a JSON file against another process to close a
+    millisecond that repairs itself is not the trade.
+    """
+    f = Path(path).parent / "incident.json"
+    if not f.exists():
+        return None, "not part of a filed incident"
+    try:
+        inc = json.loads(f.read_text())
+    except Exception as e:
+        return None, f"incident.json is unreadable ({type(e).__name__})"
+    name = Path(path).name
+    rows = [t for t in inc.get("transmissions") or [] if t.get("audio") == name]
+    if not rows:
+        return None, "no transmission in this incident points at that clip"
+    if len(rows) > 1:
+        return None, (f"{len(rows)} transmissions share this recording; "
+                      f"the truth is kept for --score but not published")
+    row = rows[0]
+    if row.get("truth") == text:
+        return row.get("id"), None          # already there; do not rewrite
+    row["truth"] = text
+    try:
+        f.write_text(json.dumps(inc, indent=1))
+    except Exception as e:
+        return None, f"incident.json could not be written ({e})"
+    return row.get("id"), None
+
+
+def corrections(cfg):
+    """Every hand-typed truth in the log, as {tape row id: text}.
+
+    What a push sends to a hosted tracker so the archived transcript there stops
+    being the machine's guess. Keyed on the row id because that is what the far
+    end stores a transmission under -- see push.py, which is the only caller and
+    which is careful about how often it asks, since this reads every incident.json
+    on disk rather than stat-ing them the way catalogue() does.
+
+    Rows filed before ids were written down are skipped rather than guessed at.
+    """
+    root = _root(cfg)
+    if not root or not root.exists():
+        return {}
+    out = {}
+    for f in sorted(root.glob("*/incident.json")):
+        try:
+            inc = json.loads(f.read_text())
+        except Exception:
+            continue
+        for t in inc.get("transmissions") or []:
+            if t.get("id") and t.get("truth") is not None:
+                out[t["id"]] = t["truth"]
+    return out
 
 
 def listing(cfg, limit=20):
@@ -730,7 +888,13 @@ def replay(cfg, which=None, play=False):
         where = ""
         if t.get("audio") in shared and t.get("start") is not None:
             where = f"  [{t['audio']} {t['start']:.2f}-{t['end']:.2f}]"
-        print(f"  {mark} +{int(t['ts'] - opened):4d}s{where}  {t['text']}")
+        # A corrected transmission prints what was typed, marked, because a
+        # timeline somebody is reading to find out what happened should show
+        # the best version of the words and should not pretend the radio was
+        # clearer than it was.
+        said = t["truth"] if t.get("truth") is not None else t["text"]
+        fixed = "*" if t.get("truth") is not None else " "
+        print(f"  {mark} +{int(t['ts'] - opened):4d}s{where} {fixed} {said}")
         if play and t.get("audio"):
             f = root / t["audio"]
             # afplay on macOS takes -t (a duration) and no start offset -- there

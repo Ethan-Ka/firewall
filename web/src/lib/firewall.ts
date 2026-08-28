@@ -35,6 +35,29 @@ export const api = (path: string): string =>
 export const wire = (path: string): Promise<Response> =>
   fetch(api(path), { cache: 'no-store', credentials: 'include' })
 
+/** The same, for a route this deployment may simply not have -- null when it
+ *  does not, the parsed body when it does.
+ *
+ *  Null covers more than a 404, because "no such route" does not always arrive
+ *  as one. A tracker served by the firewall server itself answers an unknown
+ *  /api path with a page: 200, `<!DOCTYPE html>`, and the only thing that finds
+ *  out is JSON.parse throwing halfway through rendering. That is not an error
+ *  and it is certainly not a sentence to put on the screen -- it is a server
+ *  that predates the archive, or one that never had it, which is a thing the
+ *  caller already knows how to draw. Only a real failure is left to throw.
+ */
+export async function wireJson<T>(path: string): Promise<T | null> {
+  const r = await wire(path)
+  if (r.status === 404 || r.status === 501) return null
+  if (!r.ok) throw new Error(`HTTP ${r.status}`)
+  const body = await r.text()
+  try {
+    return JSON.parse(body) as T
+  } catch {
+    return null
+  }
+}
+
 /** Where "sign in" points, and it is the server's form, never this page's.
  *
  *  Hosted, those are two different origins: the form lives with the transcripts
@@ -163,6 +186,12 @@ export interface Row {
    *  which means the row was heard and nothing was said in it. */
   text: string | null
   dispatch: boolean
+  /** Somebody listened to this clip and typed what was actually said, so `text`
+   *  is a person's and not the recogniser's. `machine` is what the recogniser
+   *  had. Both absent on a row nobody has corrected, which is nearly all of
+   *  them. */
+  corrected?: boolean
+  machine?: string | null
   url: string | null
   start?: number | null
   end?: number | null

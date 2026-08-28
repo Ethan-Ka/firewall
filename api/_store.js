@@ -221,6 +221,59 @@ export async function archive(which, records) {
   return rows.length
 }
 
+/** Put better words onto rows this archive is already holding.
+ *
+ * The one write here that is not a whole record. Everything else arrives
+ * complete -- a call is pushed again with its closing time on it, a
+ * transmission is pushed once and never changes -- and an HSET of the whole
+ * value is right for both. A correction is neither: it is a person typing what
+ * was actually said into a clip from last Tuesday, and by then the sender has
+ * nothing left of that row but its id and the words. Writing it as a whole
+ * record would replace the archived transmission with a two-field stub and
+ * lose its timing, its department and its dispatch flag.
+ *
+ * So it is read, merged and written back. `machine` keeps whatever the
+ * recogniser had said, because a transcript that quietly becomes a human's
+ * version with no trace of the machine's is one nobody can audit afterwards.
+ *
+ * Ids the archive does not hold are skipped, not created. A correction names a
+ * transmission that was pushed here at the time; if it is gone -- pruned past
+ * retention, or never archived because the words were gated then -- there is no
+ * row to improve, and inventing one out of an id and a sentence would put a
+ * transmission with no timestamp into an index that sorts on timestamps.
+ *
+ * Returns how many rows were actually changed. */
+export async function amend(which, patches) {
+  const rows = (patches || []).filter(
+    (c) => c && typeof c.id === 'string' && typeof c.text === 'string')
+  if (!rows.length) return 0
+  const ids = [...new Set(rows.map((c) => c.id))]
+  const raw = (await command(['HMGET', which.hash, ...ids])) || []
+  const held = new Map()
+  ids.forEach((id, i) => {
+    if (!raw[i]) return
+    try {
+      held.set(id, JSON.parse(raw[i]))
+    } catch { /* not JSON, so not a transmission. */ }
+  })
+  const write = []
+  for (const { id, text } of rows) {
+    const row = held.get(id)
+    /* Already says this. Not an error and not worth a write: the sender
+       re-states every correction it knows about on its full push, which is what
+       heals a lost one, and paying for that with a rewrite of the lot every few
+       minutes is what the check avoids. */
+    if (!row || row.text === text) continue
+    held.set(id, { ...row, text, machine: row.machine ?? row.text, corrected: true })
+    write.push(id)
+  }
+  if (!write.length) return 0
+  await pipeline([
+    ['HSET', which.hash, ...write.flatMap((id) => [id, JSON.stringify(held.get(id))])],
+  ])
+  return write.length
+}
+
 /** Drop what is past retention, and then whatever is over the ceiling.
  *
  * Both halves delete from the index first and the hash from what the index

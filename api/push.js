@@ -8,7 +8,7 @@
  * failure than a fetch that hangs.
  */
 import { createHash, timingSafeEqual } from 'node:crypto'
-import { ARCHIVES, archive, kvSet, pruneAll, store } from './_store.js'
+import { amend, ARCHIVES, archive, kvSet, pruneAll, store } from './_store.js'
 
 /* Compared as digests rather than as strings so the comparison is over two
  * equal-length buffers whatever was sent -- timingSafeEqual throws on a length
@@ -96,6 +96,7 @@ export default async function handler(req, res) {
      and merely wasteful, and the fallback is what makes this safe to deploy
      before the machine with the radio on it is updated. */
   let archived = 0
+  let corrected = 0
   let archiveError = null
   try {
     const calls = Array.isArray(body.archive) ? body.archive : body.calls
@@ -108,6 +109,18 @@ export default async function handler(req, res) {
       : snapshot.speech ? snapshot.feed : []
     archived = await archive(ARCHIVES.CALLS, calls)
     archived += await archive(ARCHIVES.RADIO, rows)
+    /* After the archive and never before it. A correction names a transmission
+       that is expected to be here already, and on the very first push of a
+       fresh database the row it names arrives in the same request -- so
+       merging afterwards is what lets a correction land on a transmission this
+       deployment has only just been told about, instead of being skipped for
+       not existing yet and waiting for the sender's next full push.
+
+       A sender too old to send this simply does not, and nothing here changes:
+       the transcript stays the machine's, which is what it has always been. */
+    if (Array.isArray(body.corrections)) {
+      corrected = await amend(ARCHIVES.RADIO, body.corrections)
+    }
     /* Pruning walks the indexes by score and is only worth doing when the
        sender says it has just re-sent everything, which it does every few
        minutes. Doing it on every push would be a scan for nothing 30 times a
@@ -125,6 +138,7 @@ export default async function handler(req, res) {
     ok: true,
     calls: snapshot.calls.length,
     archived,
+    corrected,
     archive_error: archiveError,
   })
 }

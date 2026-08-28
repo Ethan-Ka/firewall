@@ -687,6 +687,25 @@ export function Transcript({ feed, ok, error, live, speech = true }: {
                                 {speech ? '(no speech)' : 'locked'}
                               </span>
                             )}
+                            {/* Marked, quietly. These words were typed by
+                                somebody who listened to the clip, which makes
+                                them better than the rest of the transcript and
+                                different in kind from it -- a line nobody can
+                                tell apart from a machine's guess is one nobody
+                                can weigh. The recogniser's version is on the
+                                title so it is still there to be checked. */}
+                            {item.row.corrected && (
+                              <span
+                                className="ml-1 align-super text-[10px] text-muted-foreground"
+                                title={
+                                  item.row.machine
+                                    ? `heard as: ${item.row.machine}`
+                                    : 'corrected by ear'
+                                }
+                              >
+                                &#9998;
+                              </span>
+                            )}
                           </span>
                         </button>
                       </motion.li>

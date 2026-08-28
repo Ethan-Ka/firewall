@@ -10,7 +10,7 @@ import {
   type Call, type CurrentPayload, type LogPayload, type Row, type WindowKey,
   MARK, WINDOWS, ago, dayOf, familyOf, inScope, noteSkew, now, reducedMotion,
   signInHref, skewSeconds, spanWords, wire, expired, retained, pushedAgo,
-  LOG_PATH, HISTORY_PATH, spanOf,
+  LOG_PATH, HISTORY_PATH, spanOf, wireJson,
   type Family,
 } from '@/lib/firewall'
 
@@ -162,10 +162,12 @@ export default function App() {
     const pull = async () => {
       if (noArchive.current) return
       try {
-        const r = await wire(HISTORY_PATH)
-        if (r.status === 404) { noArchive.current = true; return }
-        if (!r.ok) throw new Error(`HTTP ${r.status}`)
-        const j: { calls?: Call[] } = await r.json()
+        /* Null is a deployment with no archive behind it, however it says so --
+           a 404, or the firewall server's own habit of answering an unknown
+           /api path with a page. Given up on for good either way: polling a
+           route that is not there is a request a minute that can only fail. */
+        const j = await wireJson<{ calls?: Call[] }>(HISTORY_PATH)
+        if (!j) { noArchive.current = true; return }
         if (stop) return
         const at = now()
         setHistory((j.calls ?? [])
@@ -298,12 +300,7 @@ export default function App() {
       if (r > rate) { best = h; rate = r }
     }
     if (best < 0) return null
-
-    /* How many times that hour came round, which is the count the figure has to
-       be read against: one busy Tuesday and a genuine pattern are the same
-       number on the screen and different claims underneath it. */
-    const days = Math.max(1, Math.round(watched[best]))
-    return { hour: best, n: calls[best], days, rate }
+    return { hour: best }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scoped, win, oldest, Math.floor(at / 60)])
 
@@ -374,17 +371,7 @@ export default function App() {
             </span>
           </Stat>
 
-          {/* The note is not decoration. An hour ranked over one day is a
-              coincidence and an hour ranked over a month is a pattern, they
-              print as the same four characters, and this line is the whole of
-              the difference. */}
-          <Stat
-            label="Busiest hour"
-            note={busiest
-              ? `${busiest.n} ${busiest.n === 1 ? 'call' : 'calls'} over `
-                + `${busiest.days} ${busiest.days === 1 ? 'day' : 'days'}`
-              : null}
-          >
+          <Stat label="Busiest hour">
             {busiest ? (
               <span className="font-mono text-2xl leading-none font-semibold tabular-nums">
                 {String(busiest.hour).padStart(2, '0')}:00
@@ -522,9 +509,8 @@ export default function App() {
    dropping it. */
 const SHARE: Record<Family, string> = { ems: 'EMS', hazard: 'fire', none: 'neither' }
 
-/* One figure in the header row. The note carries what the number cannot say on
-   its own: a busiest hour with two calls behind it and one with eleven are
-   different claims, and only the count separates them. */
+/* One figure in the header row. The optional note carries what the number
+   cannot say on its own. */
 function Stat({ label, note, children }: {
   label: string
   note?: string | null
