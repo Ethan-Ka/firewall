@@ -36,19 +36,20 @@
 # and the source, with no wheel to fetch and no version that can break because
 # something upstream shipped on a Tuesday.
 #
-# They are absent rather than empty, and absent rather than merely unlisted
-# here, because this file cannot help with them. Vercel's generic Python preset
+# Keeping them out matters more than it looks. Vercel's generic Python preset
 # matches on filename alone -- requirements.txt, pyproject.toml or Pipfile in
-# the root -- and it reads the repository, not the upload, so a name left out of
-# the list above is still a name it finds. Matching that preset would end this
-# deployment: the preset takes precedence over file-based functions, so every
-# route would go to one WSGI application that does not exist here and nothing
-# under api/ would be built at all. The only way not to match it is not to have
-# the files.
+# the build root -- and matching it would end this deployment: it forces the
+# Python builder and takes precedence over file-based functions, so every route
+# would go to one WSGI application that does not exist here and nothing under
+# api/ would be built at all. The denylist above already does that job, since
+# nothing is carved back in for them. setup.cfg says the rest.
 #
-# "framework": null in vercel.json covers the other half of the same problem --
-# a preset saved against the project in the dashboard rather than detected from
-# the tree. Detection and settings are separate paths; this needs both shut.
+# Two things this file cannot reach, both project settings, both documented in
+# api/README.md because both fail quietly: a Framework Preset of Python saved
+# against the project, which outlives whatever file first caused it, and a Root
+# Directory of `web`, left from when the tracker was the whole deployment. From
+# inside web/ there is no vercel.json, no api/ and no firewall package -- the
+# build succeeds and publishes nothing.
 
 # The two things inside web/ that are made, not written.
 /web/node_modules

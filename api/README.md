@@ -85,7 +85,16 @@ instead of leaving a month of blank rows behind it.
 
 ## What to set
 
-On the Vercel project:
+Two of these are project settings rather than environment variables, and they
+are first because nothing else matters until they are right. Both are wrong by
+default on a project that predates this layout, and both fail quietly.
+
+| Setting | Value | Why |
+| --- | --- | --- |
+| **Root Directory** | *empty* -- the repository root | The deployment used to be the tracker alone, so this was `web`. It is not any more: `vercel.json`, `api/` and the `firewall` package the collector imports all sit at the root, and every one of them is invisible from inside `web/`. Left at `web`, the build finds no config, infers no build, and publishes a deployment with no static output and no functions -- a 404 on every path, reported as a successful build. |
+| **Framework Preset** | Other | The generic Python preset matches on filename alone -- `requirements.txt`, `pyproject.toml` or `Pipfile` in the root -- and is then *saved to the project*, where it outlives the file that caused it. It carries `useRuntime: "@vercel/python"`, so it forces the Python builder whether or not a `.py` file is anywhere near, and that builder stops the build hunting for a WSGI `app` this repository does not have. Worse if it finds one: a Python preset takes precedence over file-based functions, and everything under `api/` stops being built at all. Deleting the file does not clear the setting. |
+
+Then the environment variables:
 
 | Variable | What it is |
 | --- | --- |
