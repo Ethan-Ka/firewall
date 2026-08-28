@@ -26,20 +26,29 @@
 # And what the build itself needs to read.
 !/vercel.json
 
-# There is deliberately no requirements.txt. The collector installs nothing:
-# it reaches Broadcastify, the transcription API and Redis over urllib, signs
-# its own JWT with hmac, and every third-party import left in firewall/ --
-# requests, faster_whisper, anthropic -- sits inside a function the hosted path
-# never calls. So a cold start is the runtime and the source, with no wheel to
-# fetch and no version that can break because something upstream shipped on a
-# Tuesday.
+# There is deliberately no requirements.txt, and no pyproject.toml either --
+# the packaging lives in setup.cfg, which explains itself at length.
 #
-# It is absent rather than empty on purpose. A requirements.txt at the root is
-# how Vercel decides a repository is a Python *application* and starts hunting
-# for a single WSGI entrypoint to serve every route from; pyproject.toml reads
-# the same way, which is why it is not carved back in above. This deployment is
-# a static site with Python functions beside it, and "framework": null in
-# vercel.json says so a second time.
+# The collector installs nothing: it reaches Broadcastify, the transcription API
+# and Redis over urllib, signs its own JWT with hmac, and every third-party
+# import left in firewall/ -- requests, faster_whisper, anthropic -- sits inside
+# a function body the hosted path never calls. So a cold start is the runtime
+# and the source, with no wheel to fetch and no version that can break because
+# something upstream shipped on a Tuesday.
+#
+# They are absent rather than empty, and absent rather than merely unlisted
+# here, because this file cannot help with them. Vercel's generic Python preset
+# matches on filename alone -- requirements.txt, pyproject.toml or Pipfile in
+# the root -- and it reads the repository, not the upload, so a name left out of
+# the list above is still a name it finds. Matching that preset would end this
+# deployment: the preset takes precedence over file-based functions, so every
+# route would go to one WSGI application that does not exist here and nothing
+# under api/ would be built at all. The only way not to match it is not to have
+# the files.
+#
+# "framework": null in vercel.json covers the other half of the same problem --
+# a preset saved against the project in the dashboard rather than detected from
+# the tree. Detection and settings are separate paths; this needs both shut.
 
 # The two things inside web/ that are made, not written.
 /web/node_modules
