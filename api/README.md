@@ -94,6 +94,22 @@ default on a project that predates this layout, and both fail quietly.
 | **Root Directory** | *empty* -- the repository root | The deployment used to be the tracker alone, so this was `web`. It is not any more: `vercel.json`, `api/` and the `firewall` package the collector imports all sit at the root, and every one of them is invisible from inside `web/`. Left at `web`, the build finds no config, infers no build, and publishes a deployment with no static output and no functions -- a 404 on every path, reported as a successful build. |
 | **Framework Preset** | Other | The generic Python preset matches on filename alone -- `requirements.txt`, `pyproject.toml` or `Pipfile` in the root -- and is then *saved to the project*, where it outlives the file that caused it. It carries `useRuntime: "@vercel/python"`, so it forces the Python builder whether or not a `.py` file is anywhere near, and that builder stops the build hunting for a WSGI `app` this repository does not have. Worse if it finds one: a Python preset takes precedence over file-based functions, and everything under `api/` stops being built at all. Deleting the file does not clear the setting. |
 
+One habit to avoid, because it hides both of the settings above. **Redeploy**
+rebuilds the commit belonging to the deployment it was invoked on, not the tip
+of the branch -- and a redeploy of a redeploy keeps inheriting the same commit,
+however many times it is repeated. A chain of them can sit at a commit from
+before this directory existed while the deployment list says `main` against
+every entry, because that commit is still an ancestor of `main`. What it builds
+is the repository as it was: no `vercel.json` at the root, so no build command,
+so an empty output published in about fifty milliseconds and a 404 on every
+path, functions included -- reported as `Ready`.
+
+The tell is in the build log's first line, which names the commit, and its
+`Build Completed in /vercel/output` time. A build that did the work takes tens
+of seconds and lists what it produced. To deploy the current branch, push to it
+and let the git integration open a new deployment, or promote a deployment that
+already names the commit you want.
+
 Then the environment variables:
 
 | Variable | What it is |
