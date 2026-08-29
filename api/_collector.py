@@ -53,6 +53,10 @@ STATE_TTL = 6 * 3600
 # agree; the tests in this repo are what says they do.
 SNAPSHOT_KEY = "firewall:snapshot"
 
+# Mirrored from api/_store.js the same way and for the same reason: past this
+# with nothing written, /api/current stops calling the snapshot the radio.
+STALE_SECONDS = 120
+
 
 def settings():
     """cfg, from the environment and nothing else.
@@ -459,7 +463,16 @@ def fault(message):
     cannot reach -- and leaving it behind would let the generic staleness line
     cover up the specific reason sitting right next to it.
     """
-    snapshot = _redis.get_json(SNAPSHOT_KEY) or {
+    snapshot = _redis.get_json(SNAPSHOT_KEY)
+    if snapshot and time.time() - float(snapshot.get("pushed_at") or 0) < STALE_SECONDS:
+        # Something else is keeping this page current, which on a deployment fed
+        # by push is the normal state: a machine at home is running the CLI,
+        # decoding locally, and writing this key every ten seconds. A collector
+        # that cannot start has nothing to say about a radio that is plainly
+        # working, and its complaint here would blank a live tracker for as long
+        # as it took the next push to land.
+        return message
+    snapshot = snapshot or {
         "calls": [], "feed": [], "logged": False, "speech": True,
         "hold_seconds": 600, "login_url": None,
     }

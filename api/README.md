@@ -86,31 +86,39 @@ instead of leaving a month of blank rows behind it.
 
 ## Driving the collector
 
-The schedule in `vercel.json` is `0 12 * * *`, once a day, and that is not an
-opinion about how often the radio should be read. It is the most Vercel's Hobby
-plan will accept: anything more frequent is rejected at build time, with the
-whole deployment failing rather than the cron being quietly downgraded. A
-deployment that will not build collects nothing, so the schedule is the one that
-builds.
+There is no cron in `vercel.json`, and that is a choice about where the words
+come from rather than an oversight. The collector here cannot decode audio by
+itself -- `small.en` is 480MB against a bundle limit half that -- so every clip
+it fetches has to be sent to a paid transcription service, which is what
+`FIREWALL_STT_KEY` buys. A machine at home already has the weights, has already
+paid nothing per clip for two years of `faster-whisper`, and can push what it
+hears to this deployment over ordinary outbound HTTPS. So it does.
 
-One run a day is one fifty-second window. The page will draw it and stamp it,
-and the stamp is how you can tell -- this is not a live tracker, and nothing
-here pretends it is.
+That is the push path, and it is the one this deployment runs on:
+`FIREWALL_PUSH_URL` and `FIREWALL_PUSH_TOKEN` in the collector machine's `.env`,
+the same token in this project's environment, and `/api/push` writes the
+snapshot and the archive that every reader here was built against. See
+`firewall/push.py`. The page is a copy, always a few seconds behind, and always
+stamped with how far -- which is the honest version of what it is.
 
-Two ways to have it properly:
+`/api/collect` is still here and still works. Set `FIREWALL_STT_KEY` and it
+collects; it is an ordinary endpoint with no auth on it and does not care what
+invoked it, so anything on a timer drives it:
 
-- **Pro.** Change the schedule to `* * * * *` and it works as designed, which is
-  what the rest of this file describes. The plan also lifts `maxDuration` to
-  300s, though the collector wants nothing above 60.
-- **Call it from anywhere else.** `/api/collect` is an ordinary endpoint with no
-  auth on it, and it does not care what invoked it -- Vercel's cron has no
-  special standing. Anything that can make an HTTP request on a timer drives it:
+    while true; do curl -s https://<deployment>/api/collect >/dev/null; sleep 55; done
 
-      while true; do curl -s https://<deployment>/api/collect >/dev/null; sleep 55; done
+Overlapping calls are safe, as its module docstring explains. What it will not
+do is talk over a working push: a run that ends at the configuration checks
+writes its reason onto the page only when nothing else is keeping the page
+current, because a collector that cannot start has nothing to say about a radio
+that is plainly running.
 
-  Overlapping calls are safe, as the module docstring explains, so the interval
-  does not have to be exact. The worst a stranger can do by calling it is make
-  it poll the radio, which is the thing it exists to do.
+Restoring the cron is one block in `vercel.json` and a key in the environment.
+Note what the schedule has to be if you do: Hobby rejects anything more frequent
+than daily at build time, failing the whole deployment rather than quietly
+downgrading the cron, so `0 12 * * *` is the only one that builds -- one
+fifty-second window a day, which the page will draw and stamp and which is not a
+live tracker. Pro takes `* * * * *` and works as designed.
 
 ## What to set
 

@@ -26,11 +26,5 @@
       "maxDuration": 60,
       "memory": 1024
     }
-  },
-  "crons": [
-    {
-      "path": "/api/collect",
-      "schedule": "0 12 * * *"
-    }
-  ]
+  }
 }
